@@ -1,0 +1,45 @@
+[Unit]
+Description=Vítr – anemometry přes rádio retenčky, web a Home Assistant
+After=network.target time-sync.target retencka.service
+Wants=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=vitr
+Group=vitr
+EnvironmentFile=-/etc/default/vitr
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 VITR_DATA=/var/lib/vitr
+Environment=MALLOC_ARENA_MAX=2
+WorkingDirectory=/opt/vitr/server
+ExecStart=/usr/bin/python3 -m vitr
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+MemoryHigh=64M
+MemoryMax=96M
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vitr
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

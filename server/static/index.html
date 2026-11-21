@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<!--
+  Vítr – hlavní panel anemometrů. Vzhled a stavba převzaté z webu Retenční nádrže
+  (css/style.css je jeho kopie), data z /api/* (JSON).
+-->
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <meta name="color-scheme" content="light dark">
+    <title>Vítr</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/vitr.css">
+    <script src="js/theme.js"></script>
+</head>
+<body>
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+    <defs>
+        <symbol id="i-wind" viewBox="0 0 24 24"><path d="M3 8.5h10.5a3 3 0 1 0-3-3M3 12.5h15a3 3 0 1 1-3 3M3 16.5h6.5"/></symbol>
+        <symbol id="i-gust" viewBox="0 0 24 24"><path d="M3 7h8M3 11.5h13a3 3 0 1 0-3-3M3 16h10a3 3 0 1 1-3 3"/><path d="M17 4.5l2 2M20 9h1.5"/></symbol>
+        <symbol id="i-avg" viewBox="0 0 24 24"><path d="M3.5 15c2.5-5 5-5 8.5 0s6 5 8.5 0"/><path d="M3.5 12h17" stroke-dasharray="2 2.5"/></symbol>
+        <symbol id="i-peak" viewBox="0 0 24 24"><path d="M3.5 19.5l5-8 4 4 7-11"/><path d="M15.5 4.5h4v4"/></symbol>
+        <symbol id="i-thermo" viewBox="0 0 24 24"><path d="M14 14.6V5.5a2 2 0 0 0-4 0v9.1a4 4 0 1 0 4 0z"/><path d="M12 9v7"/></symbol>
+        <symbol id="i-battery" viewBox="0 0 24 24"><rect x="3" y="7.5" width="16" height="9" rx="1.5"/><path d="M21.5 10.5v3M6.5 10.5v3M9.5 10.5v3"/></symbol>
+        <symbol id="i-antenna" viewBox="0 0 24 24"><path d="M12 12v8"/><circle cx="12" cy="10" r="1.6"/><path d="M8.6 6.6a4.8 4.8 0 0 0 0 6.8M15.4 6.6a4.8 4.8 0 0 1 0 6.8M6 4a8.5 8.5 0 0 0 0 12M18 4a8.5 8.5 0 0 1 0 12"/></symbol>
+        <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6.5 9.5 12 15l5.5-5.5"/></symbol>
+        <symbol id="i-logout" viewBox="0 0 24 24"><path d="M10 4.5H5.5v15H10"/><path d="M14.5 8l4 4-4 4M18.5 12H9.5"/></symbol>
+        <symbol id="i-login" viewBox="0 0 24 24"><path d="M14 4.5h4.5v15H14"/><path d="M9.5 8l4 4-4 4M13.5 12H4.5"/></symbol>
+        <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9.5M18.5 7H20M4 17h3.5M12.5 17H20"/><circle cx="16" cy="7" r="2.3"/><circle cx="10" cy="17" r="2.3"/></symbol>
+        <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11.5 12 5l8 6.5M6.5 10v9.5h11V10"/></symbol>
+        <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9" rx="1.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></symbol>
+        <symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 19.5h16M6.5 16.5v-5M11 16.5V7M15.5 16.5v-7M20 16.5V5"/></symbol>
+    </defs>
+</svg>
+
+<div class="app-container">
+    <header class="app-header">
+        <div class="brand">
+            <svg class="ico brand-mark" aria-hidden="true"><use href="#i-wind"/></svg>
+            <span class="brand-name">Vítr</span>
+        </div>
+        <nav class="main-nav" aria-label="Hlavní navigace">
+            <button class="nav-tab active" data-tab="dashboard" type="button">Přehled</button>
+            <button class="nav-tab" data-tab="nastaveni" type="button">Nastavení</button>
+        </nav>
+        <span class="status-pill" id="statusPill" role="status">Načítám…</span>
+        <div class="account">
+            <button class="account-btn" id="accountBtn" type="button" aria-haspopup="menu" aria-expanded="false"
+                    aria-controls="accountMenu" aria-label="Účet a motiv">
+                <span class="avatar" id="avatarInitial" aria-hidden="true">?</span>
+                <svg class="ico ico-sm" aria-hidden="true"><use href="#i-chevron"/></svg>
+            </button>
+            <div class="menu hidden" id="accountMenu" role="menu" aria-labelledby="accountBtn">
+                <div class="menu-head">
+                    <span class="avatar avatar-lg" id="menuInitial" aria-hidden="true">?</span>
+                    <div class="menu-who"><strong id="userBadge">Host</strong><span id="userRole">jen prohlížení</span></div>
+                </div>
+                <div class="menu-sep" role="separator"></div>
+                <div class="menu-theme" role="group" aria-label="Motiv">
+                    <span class="menu-theme-label">Motiv</span>
+                    <div class="seg seg-sm" id="themeSeg">
+                        <button type="button" data-theme-pick="auto" title="Podle zařízení">Auto</button>
+                        <button type="button" data-theme-pick="light">Světlý</button>
+                        <button type="button" data-theme-pick="dark">Tmavý</button>
+                    </div>
+                </div>
+                <div class="menu-sep" role="separator"></div>
+                <button class="menu-item" id="loginMenuBtn" type="button" role="menuitem">
+                    <svg class="ico" aria-hidden="true"><use href="#i-login"/></svg>Přihlásit správce</button>
+                <button class="menu-item hidden" id="logoutBtn" type="button" role="menuitem">
+                    <svg class="ico" aria-hidden="true"><use href="#i-logout"/></svg>Odhlásit</button>
+                <div class="menu-foot" id="menuVersion"></div>
+            </div>
+        </div>
+    </header>
+
+    <div id="nodeBar" class="node-bar hidden" role="tablist" aria-label="Anemometry"></div>
+
+    <!-- ======================================================= PŘEHLED -->
+    <div id="dashboard" class="tab-content active">
+        <div id="emptyState" class="card empty-card hidden">
+            <svg class="ico" aria-hidden="true"><use href="#i-wind"/></svg>
+            <h2>Zatím žádný anemometr</h2>
+            <p class="muted">V <b>Nastavení → Čidla</b> klikněte na <b>Čekat na nové čidlo</b> a pak do anemometru vložte baterii.</p>
+        </div>
+
+        <!-- Všechny anemometry (volba v liště, když jsou aspoň dva) -->
+        <div id="overview" class="hidden">
+            <div class="overview-grid" id="overviewGrid"></div>
+            <section class="card chart-card span-all mt-20">
+                <div class="card-head">
+                    <div class="card-head-text"><h2>Vítr na všech anemometrech</h2><p class="card-desc">Průměrná rychlost větru ze všech anemometrů v jednom grafu.</p></div>
+                    <div class="range-picker" data-chart="all"></div>
+                </div>
+                <div class="chart-container chart-tall"><canvas id="allChart"></canvas></div>
+            </section>
+        </div>
+
+        <div id="nodeDash" class="hidden">
+            <div class="chart-grid dash-cards">
+                <!-- Údaje anemometru: jen hodnoty, bez obrázku -->
+                <section class="card facts-card wind-facts span-all" id="windCard" aria-labelledby="windTitle">
+                    <div class="wind-head">
+                        <h2 class="tank-name" id="windTitle"><span id="txtName">Anemometr</span></h2>
+                        <p class="tank-status" id="txtStatus"><span class="dot"></span><span>–</span></p>
+                    </div>
+                    <div class="fact-col">
+                        <div class="fact-group">
+                            <h3><svg class="ico" aria-hidden="true"><use href="#i-wind"/></svg>Vítr teď</h3>
+                            <dl class="facts">
+                                <div class="fact"><dt>Rychlost</dt><dd><span id="txtMs">–</span><small id="txtKmh">–</small></dd></div>
+                                <div class="fact"><dt>Náraz</dt><dd><span id="txtGust">–</span><small id="txtGustKmh">–</small></dd></div>
+                                <div class="fact"><dt>Síla větru</dt><dd><span id="txtBft">–</span><small id="txtBftSub">–</small></dd></div>
+                            </dl>
+                        </div>
+                    </div>
+                    <div class="fact-col">
+                        <div class="fact-group">
+                            <h3><svg class="ico" aria-hidden="true"><use href="#i-avg"/></svg>Průměry a maxima</h3>
+                            <dl class="facts">
+                                <div class="fact"><dt>Průměr 10 min</dt><dd><span id="txtAvg">–</span><small id="txtAvgKmh">–</small></dd></div>
+                                <div class="fact"><dt>Průměr za hodinu</dt><dd><span id="txtAvg1h">–</span><small id="txtAvg1hKmh">–</small></dd></div>
+                                <div class="fact"><dt>Nejsilnější náraz dnes</dt><dd><span id="txtPeak">–</span><small id="txtPeakTime">–</small></dd></div>
+                            </dl>
+                        </div>
+                    </div>
+                    <div class="fact-col">
+                        <div class="fact-group">
+                            <h3><svg class="ico" aria-hidden="true"><use href="#i-antenna"/></svg>Čidlo</h3>
+                            <dl class="facts">
+                                <div class="fact"><dt>Signál</dt><dd><span id="txtRssi">–</span><small id="txtLoss">–</small></dd></div>
+                                <div class="fact"><dt>Teplota čidla</dt><dd id="txtTemp">–</dd></div>
+                                <div class="fact"><dt>Baterie</dt><dd><span id="txtBat">–</span><small id="txtBatV">–</small></dd></div>
+                            </dl>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="card chart-card level-card span-all">
+                    <div class="card-head">
+                        <div class="card-head-text"><h2>Rychlost větru</h2><p class="card-desc">Průměrná rychlost a nejsilnější 3sekundový náraz; u delších rozsahů průměr a maximum za úsek.</p></div>
+                        <div class="range-picker" data-chart="wind"></div>
+                    </div>
+                    <div class="chart-container chart-tall"><canvas id="windChart"></canvas></div>
+                </section>
+
+                <section class="card chart-card span-all bat-card">
+                    <div class="card-head">
+                        <div class="card-head-text"><h2>Baterie a signál</h2><p class="card-desc">Napětí baterie a síla signálu čidla.</p></div>
+                        <div class="range-picker" data-chart="battery" data-default="30d"></div>
+                    </div>
+                    <div class="chart-container"><canvas id="batteryChart"></canvas></div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======================================================= NASTAVENÍ -->
+    <div id="nastaveni" class="tab-content">
+        <div class="page-head"><h1>Nastavení</h1></div>
+
+        <section class="card login-card hidden" id="loginCard">
+            <div class="card-title">
+                <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-lock"/></svg></span>
+                <div><h2>Přihlášení správce</h2><p class="card-desc">Prohlížet může kdokoli v domácí síti, nastavení jen se správcovským heslem.</p></div>
+            </div>
+            <form id="loginForm" class="inline-actions">
+                <input type="password" id="loginPw" class="unified-input" autocomplete="current-password" placeholder="Heslo" required>
+                <button class="btn btn-primary" type="submit">Přihlásit</button>
+            </form>
+            <p class="muted small">Heslo z první instalace: na Raspberry Pi <code>sudo cat /var/lib/vitr/heslo.txt</code></p>
+        </section>
+
+        <div class="set-layout hidden" id="setLayout">
+            <nav class="set-nav" id="setNav" aria-label="Části nastavení"></nav>
+            <div class="stack" id="setStack">
+                <section class="card" id="cardNodes" data-nav="Čidla" data-group="Anemometry">
+                    <div class="card-title">
+                        <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-antenna"/></svg></span>
+                        <div><h2>Čidla</h2><p class="card-desc">Spárované anemometry, párování nového čidla a čidla v dosahu.</p></div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="user-table">
+                            <thead><tr><th>Čidlo</th><th>ID</th><th>Stav</th><th>Signál</th><th>Baterie</th><th></th></tr></thead>
+                            <tbody id="nodesBody"></tbody>
+                        </table>
+                    </div>
+                    <div class="inline-actions">
+                        <button class="btn btn-primary" type="button" id="pairBtn">Čekat na nové čidlo</button>
+                        <span class="muted small" id="pairHint">Po kliknutí vložte do anemometru baterii – do minuty se spáruje.</span>
+                    </div>
+                    <p class="muted small hidden" id="heardList"></p>
+                </section>
+
+                <div id="nodeCards"></div>
+
+                <section class="card" id="cardMqtt" data-nav="Home Assistant" data-group="Propojení">
+                    <div class="card-title">
+                        <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-home"/></svg></span>
+                        <div><h2>Home Assistant (MQTT)</h2><p class="card-desc">Stačí stejný broker jako u retenčky; anemometry se v Home Assistantu objeví samy jako zařízení.</p></div>
+                    </div>
+                    <form id="mqttForm">
+                        <label class="toggle">
+                            <span class="switch"><input type="checkbox" id="mqEnabled"><span class="slider"></span></span>
+                            <span class="toggle-text">Posílat data do Home Assistantu</span>
+                        </label>
+                        <div class="form-row mt-15">
+                            <div class="form-group"><label for="mqHost">Broker</label><input id="mqHost" class="unified-input" placeholder="127.0.0.1"></div>
+                            <div class="form-group"><label for="mqPort">Port</label><input id="mqPort" class="unified-input" type="number" min="1" max="65535" autocomplete="off"></div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group"><label for="mqUser">Uživatel</label><input id="mqUser" class="unified-input" autocomplete="off"></div>
+                            <div class="form-group"><label for="mqPass">Heslo</label><input id="mqPass" class="unified-input" type="password" autocomplete="new-password"></div>
+                        </div>
+                        <div class="inline-actions">
+                            <button class="btn btn-primary" type="submit">Uložit</button>
+                            <span class="muted small" id="mqStatus"></span>
+                        </div>
+                    </form>
+                </section>
+
+                <section class="card" id="cardAccount" data-nav="Heslo" data-group="Systém">
+                    <div class="card-title">
+                        <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-lock"/></svg></span>
+                        <div><h2>Heslo správce</h2><p class="card-desc">Heslo pro změny nastavení tohoto webu.</p></div>
+                    </div>
+                    <form id="pwForm">
+                        <div class="form-row">
+                            <div class="form-group"><label for="pwOld">Současné heslo</label><input type="password" id="pwOld" class="unified-input" autocomplete="current-password" required></div>
+                            <div class="form-group"><label for="pwNew">Nové heslo (min. 8 znaků)</label><input type="password" id="pwNew" class="unified-input" autocomplete="new-password" minlength="8" required></div>
+                        </div>
+                        <div class="inline-actions"><button class="btn btn-outline" type="submit">Změnit heslo</button></div>
+                    </form>
+                </section>
+
+                <section class="card" id="cardDiag" data-nav="Diagnostika" data-group="Systém">
+                    <div class="card-title">
+                        <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-bars"/></svg></span>
+                        <div><h2>Diagnostika</h2><p class="card-desc">Příjem přes rádio retenčky (most na 127.0.0.1) a stav služby.</p></div>
+                    </div>
+                    <dl class="kv" id="diagKv"></dl>
+                </section>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

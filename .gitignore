@@ -1,0 +1,36 @@
+# Build (AVR) – kromě hotového firmwaru, který se nahrává do čidla
+uzel/build/*
+!uzel/build/firmware.hex
+*.elf
+*.lss
+*.map
+*.o
+*.d
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Runtime data & secrets – NIKDY do gitu
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+heslo.txt
+*.key
+
+# Editor / OS
+.vscode/
+.idea/
+.claude/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# hotový programátor jtag2updi pro Arduino (nahrává 0-priprav-arduino.cmd)
+!uzel/tools/jtag2updi/*.hex

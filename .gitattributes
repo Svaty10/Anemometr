@@ -1,0 +1,25 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Source code files
+*.c text eol=lf
+*.h text eol=lf
+Makefile text eol=lf
+*.md text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Raspberry Pi / Linux files - must stay LF (shebang, systemd, bash)
+*.sh text eol=lf
+*.py text eol=lf
+*.service text eol=lf
+
+# Windows scripts
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# firmware image
+*.hex -text
