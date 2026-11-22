@@ -118,6 +118,29 @@ typedef struct {
  *  then leave the radio configured in SLEEP (ready for cc1101_send). */
 void cc1101_probe(cc1101_probe_t *p);
 
+/* Line test (cc1101_lines): the SPI pins checked one by one as plain I/O, and the
+ * radio told to drive GDO0 / SO to fixed levels – tells which side is broken even
+ * when nothing can be read back over SPI. */
+#define CL_MISO_IDLE_HI     0x01U   /**< MISO high with CSn high (internal pull-up): line free */
+#define CL_MISO_MOSI        0x02U   /**< MISO follows MOSI: the two lines are joined */
+#define CL_MISO_SCK         0x04U   /**< MISO follows SCLK: the two lines are joined */
+#define CL_SO_LOW           0x08U   /**< SO pulled low after CSn low (chip selected, crystal runs) */
+#define CL_SO_RELEASE       0x10U   /**< SO released again after CSn high */
+#define CL_GDO0_CLK         0x20U   /**< clock on GDO0 after SRES (default CLK_XOSC/192) */
+#define CL_GDO0_LO          0x40U   /**< GDO0 low after writing IOCFG0 = 0x2F (radio took a write) */
+#define CL_GDO0_HI          0x80U   /**< GDO0 high after writing IOCFG0 = 0x6F */
+#define CL2_SO_DRIVE_LO     0x01U   /**< SO pin driven low by IOCFG1 = 0x2F (CSn high, pull-up on) */
+#define CL2_SO_DRIVE_HI     0x02U   /**< SO pin driven high by IOCFG1 = 0x6F (CSn high, pull-up off) */
+
+typedef struct {
+    uint8_t flags;          /**< CL_* */
+    uint8_t flags2;         /**< CL2_* */
+    uint8_t clk_edges;      /**< GDO0 level changes counted after SRES (255 = many) */
+} cc1101_lines_t;
+
+/** Line test, run before cc1101_probe (leaves the radio reset, SPI closed). */
+void cc1101_lines(cc1101_lines_t *l);
+
 /** Listen `ms` milliseconds and count every packet on the channel (any sender). */
 void cc1101_listen(uint16_t ms, cc1101_heard_t *h);
 

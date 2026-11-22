@@ -18,6 +18,22 @@ mrtvým rádiem.
 
 ## Co se testuje (každých ~6 s)
 
+**Test linek SPI** – proběhne jako první a nespoléhá na čtení dat přes MISO, takže rozhodne
+i tehdy, když se po SPI čtou jen nuly:
+
+| Test | Co znamená výsledek |
+|---|---|
+| MISO volná (CSn=1, pull-up) | NE = linku SO/MISO něco drží v nule, i když rádio není vybrané (vadný výstup SO čipu) |
+| MISO spojená s MOSI / SCLK | ANO = můstek mezi linkami |
+| Rádio stáhne SO po CSn=0 / pustí po CSn=1 | čip reaguje na výběr (CSn) a běží mu krystal |
+| Hodiny na GDO0 po resetu | ANO = čip je napájený a krystal 26 MHz kmitá (výchozí výstup CLK_XOSC/192) |
+| Rádio přijme zápis (GDO0 0 a 1) | do IOCFG0 se zapíše „trvale 0“ a „trvale 1“; ANO = rádio dostává příkazy (CSn, SCLK, MOSI v pořádku) |
+| Rádio ovládá pin SO (0 a 1) | totéž přes IOCFG1 na pinu SO; NE při jinak funkčním zápisu = vadný výstup SO čipu |
+
+Výpis z toho udělá **VERDIKT** (např. „vadný výstup SO čipu CC1101 – vyměňte modul“).
+
+**Rádio a příjem:**
+
 | Test | Co znamená NE |
 |---|---|
 | Rádio odpovídá (SO, krystal) | CC1101 nemá napájení, nebo vadný spoj CSn (PA4) / SO-MISO (PA2), nekmitá krystal 26 MHz |
@@ -38,5 +54,6 @@ párovací klíč** a stav kontaktu anemometru s počtem pulzů (otočte miskami
 - Firmware `uzel/src/diag.c`, překlad `make diag` (nebo `nahraj.ps1 -Diagnostika -Build`);
   hotový `uzel/build/diag.hex` je v repozitáři. Běžný firmware se tím nemění.
 - Výsledek je v EEPROM od adresy 0xC0 (klíče párování jsou na 0x00–0x75, diagnostika je jen čte).
+  Záznam verze 2 (37 B) má za paketem navíc 3 bajty testu linek; vyčítací skript zná i starší verzi 1.
 - V každém cyklu čidlo jednou vysílá testovací paket typu 0x17 bez šifrování. Retenčka ho
   započítá jako cizí paket a zahodí.

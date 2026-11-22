@@ -255,7 +255,9 @@ function Show-Diagnostika([byte[]]$ee) {
         Write-Host ("Párovací klíč v EEPROM: " + $(if ($key) { "ANO (čidlo je spárované)" } else { "NE" }))
         return
     }
-    $n = 34
+    # verze 2 (pkt[3]) přidává za paket test linek: lines | lines2 | clk_edges
+    $v2 = $ee[$base + 9 + 3] -ge 2
+    $n = if ($v2) { 37 } else { 34 }
     $crc = Get-Crc16 $ee $base ($n - 2)
     if ($crc -ne (& $u16 ($base + $n - 2))) {
         Write-Host "Záznam diagnostiky je poškozený (čtení během zápisu?) – zkuste vyčíst znovu." -ForegroundColor Yellow
@@ -296,6 +298,25 @@ function Show-Diagnostika([byte[]]$ee) {
     Write-Host ("  Teplota čipu:           " + $(if ($temp -eq -128) { "–" } else { "$temp °C" }))
     Write-Host ("  Párovací klíč v EEPROM: " + $(if ($key) { "ANO – hub musí mít čidlo spárované" } else { "NE – čidlo s normálním firmwarem nabízí párování" }))
     Write-Host ("  Kontakt anemometru:     " + $(if ($reed) { "sepnutý" } else { "rozepnutý" }) + ", pulzů od startu diagnostiky: $pulses")
+    if ($v2) {
+        $l = $ee[$base + 32]; $l2 = $ee[$base + 33]; $edges = $ee[$base + 34]
+        $idle = ($l -band 0x01) -ne 0
+        $bMosi = ($l -band 0x02) -ne 0; $bSck = ($l -band 0x04) -ne 0
+        $soLow = ($l -band 0x08) -ne 0; $soRel = ($l -band 0x10) -ne 0
+        $clk = ($l -band 0x20) -ne 0
+        $wr = (($l -band 0x40) -ne 0) -and (($l -band 0x80) -ne 0)
+        $soDrv = (($l2 -band 0x01) -ne 0) -and (($l2 -band 0x02) -ne 0)
+        Write-Host "Test linek SPI (bez čtení dat přes MISO)" -ForegroundColor Cyan
+        Write-Host ("  MISO volná (CSn=1, pull-up):     " + $(if ($idle) { "ANO" } else { "NE – trvale v nule" }))
+        if ($idle) {
+            Write-Host ("  MISO spojená s MOSI / SCLK:      " + (& $ano $bMosi) + " / " + (& $ano $bSck))
+            Write-Host ("  Rádio stáhne SO po CSn=0:        " + (& $ano $soLow))
+            Write-Host ("  ... a pustí ho po CSn=1:         " + (& $ano $soRel))
+        }
+        Write-Host ("  Hodiny na GDO0 po resetu rádia:  " + (& $ano $clk) + "  ($edges změn)")
+        Write-Host ("  Rádio přijme zápis (GDO0 0 a 1): " + (& $ano $wr))
+        Write-Host ("  Rádio ovládá pin SO (0 a 1):     " + (& $ano $soDrv))
+    }
     Write-Host "Rádio CC1101" -ForegroundColor Cyan
     Write-Host ("  Odpovídá (SO, krystal): " + (& $ano $so))
     Write-Host ("  PARTNUM / VERSION:      0x{0:X2} / 0x{1:X2}" -f $part, $ver)
@@ -309,8 +330,37 @@ function Show-Diagnostika([byte[]]$ee) {
     Write-Host ("  V posledním cyklu:      $heard (chybných $bad)" + $(if ($heard) { ", poslední: $tname (0x{0:X2}) od $lid" -f $ltype } else { "" }))
 
     $tips = @()
-    if (-not $so) {
+    $lineFault = $false
+    if ($v2) {
+        $lineFault = $true
+        if (-not $idle -and $wr) {
+            $tips += ("VERDIKT: rádio příkazy přijímá (GDO0 poslouchá zápisy), ale linka SO/MISO je trvale v nule,`n" +
+                      "     i když rádio vybrané není. Vadný výstup SO čipu CC1101 – vyměňte modul." +
+                      $(if (-not $soDrv) { "`n     (Ani na povel rádio pin SO nezvedne – potvrzuje to.)" } else { "" }))
+        } elseif (-not $idle) {
+            $tips += ("VERDIKT: linka SO/MISO je trvale v nule a rádio nepřijímá žádné příkazy (GDO0 na zápis nereaguje).`n" +
+                      $(if ($clk) { "     Čip je napájený a krystal běží (hodiny na GDO0), ale SPI rozhraní čipu je mrtvé.`n" } else { "" }) +
+                      "     Vadný čip CC1101 – vyměňte modul (nebo jej zkuste na funkční desce).")
+        } elseif ($bMosi -or $bSck) {
+            $tips += "VERDIKT: MISO je spojená s " + $(if ($bMosi) { "MOSI" } else { "SCLK" }) + " – můstek mezi spoji (na desce nebo uvnitř modulu)."
+        } elseif (-not $soLow) {
+            $tips += ("VERDIKT: rádio po CSn=0 nestáhne SO – " +
+                      $(if ($clk) { "krystal přitom běží, nereaguje na CSn: vadný čip nebo spoj CSn na modulu." } else { "bez hodin na GDO0: čip nemá napájení/krystal, nebo je mrtvý." }))
+        } elseif (-not $soRel) {
+            $tips += "VERDIKT: rádio po CSn=1 nepustí SO (drží ho v nule) – vadný čip CC1101, vyměňte modul."
+        } elseif (-not $wr) {
+            $tips += "VERDIKT: linky jsou v pořádku, ale rádio zápisy nepřijímá (GDO0 nereaguje) – SI/MOSI nebo SCLK na modulu, případně vadný čip."
+        } else {
+            $lineFault = $false
+        }
+    }
+    if ($lineFault) {
+        $tips += "Ostatní údaje rádia (PARTNUM, PLL, vysílání, šum) jsou kvůli tomu bez významu."
+    } elseif (-not $so) {
         $tips += "Rádio vůbec neodpovídá: napájení modulu CC1101, spoje CSn (PA4) a SO/MISO (PA2), krystal 26 MHz."
+    } elseif ($v2 -and -not $spi -and $part -eq 0x00 -and $ver -eq 0x00) {
+        $tips += ("Linky SPI i ovládání rádia prošly, přesto se při čtení registrů vrací jen nuly:`n" +
+                  "     rádio nevydává data na SO – vadný čip CC1101, vyměňte modul.")
     } elseif (-not $spi -and $part -eq 0x00 -and $ver -eq 0x00) {
         # SO drží stále nulu: "odpovídá" je jen zdání, každé čtení vrátí 0x00 (i MARCSTATE, RSSI)
         $tips += ("S rádiem neprobíhá žádná komunikace – po SPI se čtou jen nuly (linka SO/MISO stále v nule).`n" +

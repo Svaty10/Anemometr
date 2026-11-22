@@ -6,7 +6,7 @@
  *        6-precist-diagnostiku.cmd reads it over UPDI and explains it
  *        (docs/diagnostika.md). Works even with a dead radio; nothing on the hub.
  *
- * Cycle (~6 s): radio probe (SPI bus, crystal, PLL) -> battery + chip temperature
+ * Cycle (~6 s): line test of the SPI pins (cc1101_lines) -> radio probe (SPI bus, crystal, PLL) -> battery + chip temperature
  * -> 2 s listening on the channel (any packet: tank sensors, the other anemometer)
  * -> one test transmission (plain DIAG packet 0x17; the tank hub counts it as a
  * foreign packet and drops it) -> EEPROM record -> 4 s sleep.
@@ -26,7 +26,7 @@
 #include <avr/interrupt.h>
 #include <string.h>
 
-#define DIAG_VERSION        1U
+#define DIAG_VERSION        2U      /* 2: line test (lines/lines2/clk_edges) in the EEPROM record */
 #define DIAG_PERIOD_S       4U
 #define DIAG_LISTEN_MS      2000U
 
@@ -51,6 +51,9 @@ typedef struct __attribute__((packed)) {
     uint16_t heard_total;             /* packets heard on the channel since the start */
     int8_t   heard_best;              /* strongest of them [dBm], -128 = none */
     uint8_t  pkt[PKT_DIAG_LEN];
+    uint8_t  lines;                   /* cc1101_lines: CL_* */
+    uint8_t  lines2;                  /* CL2_* */
+    uint8_t  clk_edges;               /* GDO0 clock edges after SRES */
     uint16_t crc;
 } diag_ee_t;
 
@@ -107,6 +110,12 @@ int main(void)
     rec.heard_best = -128;
 
     for (;;) {
+        wdt_kick();
+        cc1101_lines_t ln;
+        cc1101_lines(&ln);
+        rec.lines = ln.flags;
+        rec.lines2 = ln.flags2;
+        rec.clk_edges = ln.clk_edges;
         wdt_kick();
         cc1101_probe_t pr;
         cc1101_probe(&pr);

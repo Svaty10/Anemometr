@@ -432,6 +432,123 @@ void cc1101_probe(cc1101_probe_t *p)
     (void)enter_sleep();
 }
 
+#define CC1101_IOCFG1       0x01
+
+static bool miso_high(void) { return (PORTA.IN & PIN_SPI_MISO) != 0; }
+
+/** Level changes on GDO0 in ~3 ms of polling (a clock of 135 kHz gives dozens). */
+static uint8_t gdo0_edges(void)
+{
+    uint8_t n = 0;
+    uint8_t last = PORTB.IN & PIN_RF_GDO0;
+    for (uint16_t i = 0; i < 1500U; i++) {
+        uint8_t v = PORTB.IN & PIN_RF_GDO0;
+        if (v != last) {
+            last = v;
+            if (n < 255U) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static bool gdo0_steady(bool high)
+{
+    _delay_us(50);
+    for (uint16_t i = 0; i < 500U; i++) {
+        if (((PORTB.IN & PIN_RF_GDO0) != 0) != high) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void cc1101_lines(cc1101_lines_t *l)
+{
+    uint8_t f = 0, g = 0;
+
+    /* 1) the pins as plain I/O: SPI off, MISO with the internal pull-up, CSn high
+     *    (the CC1101 keeps SO in high impedance while CSn is high) */
+    SPI0.CTRLA = 0;
+    PORTA.DIRSET = PIN_SPI_MOSI | PIN_SPI_SCK | PIN_SPI_CSN;
+    PORTA.DIRCLR = PIN_SPI_MISO;
+    PORTA.PIN2CTRL = PORT_PULLUPEN_bm;
+    cs_high();
+    PORTA.OUTSET = PIN_SPI_MOSI | PIN_SPI_SCK;
+    _delay_us(200);
+    bool idle = miso_high();
+    if (idle) {
+        f |= CL_MISO_IDLE_HI;
+    }
+    PORTA.OUTCLR = PIN_SPI_MOSI;
+    _delay_us(100);
+    if (idle && !miso_high()) {
+        f |= CL_MISO_MOSI;
+    }
+    PORTA.OUTSET = PIN_SPI_MOSI;
+    PORTA.OUTCLR = PIN_SPI_SCK;
+    _delay_us(100);
+    if (idle && !miso_high()) {
+        f |= CL_MISO_SCK;
+    }
+    PORTA.OUTCLR = PIN_SPI_MOSI;
+
+    /* 2) CSn low: the chip wakes up and pulls SO low once its crystal runs */
+    cs_low();
+    for (uint16_t t = 0; t < 3000U; t++) {
+        if (!miso_high()) {
+            f |= CL_SO_LOW;
+            break;
+        }
+        _delay_us(1);
+    }
+    _delay_us(50);
+    cs_high();
+    _delay_us(200);
+    if (miso_high()) {
+        f |= CL_SO_RELEASE;
+    }
+
+    /* 3) does the radio take commands? Checked on GDO0 and on SO driven as GDO1,
+     *    not by reading registers back over MISO. */
+    spi_open();
+    PORTB.PIN2CTRL = 0;                          /* GDO0 input buffer on */
+    (void)strobe(CC1101_SRES);
+    _delay_ms(1);
+    l->clk_edges = gdo0_edges();
+    if (l->clk_edges >= 8U) {
+        f |= CL_GDO0_CLK;
+    }
+    write_reg(CC1101_IOCFG0, 0x2F);              /* GDO0: constant 0 */
+    if (gdo0_steady(false)) {
+        f |= CL_GDO0_LO;
+    }
+    write_reg(CC1101_IOCFG0, 0x6F);              /* GDO0: constant 0, inverted = 1 */
+    if (gdo0_steady(true)) {
+        f |= CL_GDO0_HI;
+    }
+    write_reg(CC1101_IOCFG1, 0x2F);              /* SO/GDO1 while CSn high: constant 0 */
+    PORTA.PIN2CTRL = PORT_PULLUPEN_bm;
+    _delay_us(200);
+    if (!miso_high()) {
+        g |= CL2_SO_DRIVE_LO;
+    }
+    PORTA.PIN2CTRL = 0;
+    write_reg(CC1101_IOCFG1, 0x6F);              /* ... constant 1 (pull-up off: the chip must drive it) */
+    _delay_us(200);
+    if (miso_high()) {
+        g |= CL2_SO_DRIVE_HI;
+    }
+    write_reg(CC1101_IOCFG1, 0x2E);
+    (void)strobe(CC1101_SRES);
+    PORTB.PIN2CTRL = PORT_ISC_INPUT_DISABLE_gc;
+    spi_close();
+
+    l->flags = f;
+    l->flags2 = g;
+}
+
 void cc1101_listen(uint16_t ms, cc1101_heard_t *h)
 {
     uint8_t buf[64];
