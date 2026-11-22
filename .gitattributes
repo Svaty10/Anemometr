@@ -25,3 +25,6 @@ Makefile text eol=lf
 *.hex -text
 
 *.conf text eol=lf
+*.path text eol=lf
+*.timer text eol=lf
+*.yml text eol=lf
