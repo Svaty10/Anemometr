@@ -311,6 +311,13 @@ function Show-Diagnostika([byte[]]$ee) {
     $tips = @()
     if (-not $so) {
         $tips += "Rádio vůbec neodpovídá: napájení modulu CC1101, spoje CSn (PA4) a SO/MISO (PA2), krystal 26 MHz."
+    } elseif (-not $spi -and $part -eq 0x00 -and $ver -eq 0x00) {
+        # SO drží stále nulu: "odpovídá" je jen zdání, každé čtení vrátí 0x00 (i MARCSTATE, RSSI)
+        $tips += ("S rádiem neprobíhá žádná komunikace – po SPI se čtou jen nuly (linka SO/MISO stále v nule).`n" +
+                  "     Ostatní údaje rádia (PLL, vysílání, šum) jsou proto nesmyslné. Proměřte multimetrem`n" +
+                  "     ATtiny1624 → modul CC1101: CSn (PA4, pin 2), SCLK (PA3, pin 13), SI/MOSI (PA1, pin 11),`n" +
+                  "     SO/MISO (PA2, pin 12) – průchodnost a zkrat na GND/sousední pin, a 3,3 V + GND na modulu.`n" +
+                  "     Nejčastěji: studený spoj nebo můstek cínu na CSn/SCLK, modul přepájený posunutě.")
     } else {
         if (-not $spi) { $tips += "Rádio odpovídá, ale zápis/čtení registru nesedí: spoje SI/MOSI (PA1) a SCLK (PA3), studený spoj." }
         if ($part -ne 0x00 -or ($ver -ne 0x14 -and $ver -ne 0x04)) { $tips += "Neobvyklé PARTNUM/VERSION – čip nejspíš není CC1101 nebo SPI čte nesmysly." }
