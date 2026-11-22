@@ -15,6 +15,8 @@
   .\nahraj.ps1 -Port COM5  # port zadaný ručně (když je připojeno víc zařízení)
   .\nahraj.ps1 -Build      # firmware vždy znovu přeložit (jinak jen když build\firmware.hex chybí)
   .\nahraj.ps1 -PripravArduino   # z Arduina Uno/Nano udělá programátor jtag2updi (pin 6)
+  .\nahraj.ps1 -Diagnostika      # nahraje DIAGNOSTICKÝ firmware (test rádia a desky, ..\docs\diagnostika.md)
+  .\nahraj.ps1 -Cti              # vyčte a vysvětlí výsledek diagnostiky z čidla
 
   Programátor se pozná sám: Arduino/převodník na pinech 0/1 (SerialUPDI), nebo Arduino
   s jtag2updi (pin 6). Ručně: -Programmer serialupdi | jtag2updi.
@@ -26,6 +28,8 @@ param(
     [switch]$Build,
     [switch]$PripravArduino,
     [switch]$SmazatParovani,
+    [switch]$Diagnostika,
+    [switch]$Cti,
     [int]$Baud = 115200,
     [string]$Programmer = "auto",
     [string]$ToolsDir = "C:\avr"
@@ -176,9 +180,11 @@ function Install-Jtag2updi {
     throw "Nahrání do Arduina selhalo – je to Uno/Nano (ATmega328P)? Zavřete Arduino IDE a odpojte dráty z Arduina."
 }
 
-function Get-Firmware {
+function Get-Firmware([string]$name = "firmware",
+                      [string[]]$srcs = @("main", "power", "adc", "wind", "cc1101", "crypto", "proto", "link"),
+                      [string[]]$defs = @()) {
     New-Item -ItemType Directory -Force build | Out-Null
-    $hex = "build\firmware.hex"
+    $hex = "build\$name.hex"
     if ($Build -or -not (Test-Path $hex)) {
         $gcc = Find-Tool "avr-gcc"
         if (-not $gcc) { throw "Pro překlad je potřeba avr-gcc >= 12 (rozbalit do $ToolsDir, viz ..\docs\programovani.md)." }
@@ -186,17 +192,18 @@ function Get-Firmware {
         $cflags = @("-mmcu=attiny1624", "-DF_CPU=3333333UL", "-Iinclude", "-Os", "-std=gnu11",
                     "-Wall", "-Wextra", "-Werror", "-Wno-array-bounds",
                     "-funsigned-char", "-funsigned-bitfields", "-fshort-enums",
-                    "-ffunction-sections", "-fdata-sections", "-flto")
+                    "-ffunction-sections", "-fdata-sections", "-flto") + $defs
         $objs = @()
-        foreach ($s in @("main", "power", "adc", "wind", "cc1101", "crypto", "proto", "link")) {
-            & $gcc @cflags -c "src\$s.c" -o "build\$s.o"
+        foreach ($s in $srcs) {
+            $obj = if ($name -eq "firmware") { "build\$s.o" } else { "build\$name-$s.o" }
+            & $gcc @cflags -c "src\$s.c" -o $obj
             if ($LASTEXITCODE -ne 0) { throw "Překlad src\$s.c selhal." }
-            $objs += "build\$s.o"
+            $objs += $obj
         }
-        & $gcc -mmcu=attiny1624 -Os -flto "-Wl,--gc-sections" @objs -o build\firmware.elf
+        & $gcc -mmcu=attiny1624 -Os -flto "-Wl,--gc-sections" @objs -o "build\$name.elf"
         if ($LASTEXITCODE -ne 0) { throw "Linkování selhalo." }
-        & (Join-Path $bin "avr-objcopy.exe") -O ihex -R .eeprom -R .fuse -R .lock -R .signature build\firmware.elf $hex
-        & (Join-Path $bin "avr-size.exe") build\firmware.elf
+        & (Join-Path $bin "avr-objcopy.exe") -O ihex -R .eeprom -R .fuse -R .lock -R .signature "build\$name.elf" $hex
+        & (Join-Path $bin "avr-size.exe") "build\$name.elf"
         return $hex
     }
     Write-Host "Použiji přeložený $hex (znovu přeložit: -Build)."
@@ -211,6 +218,147 @@ if ($PripravArduino) {
 if ($Test) {
     Invoke-Avrdude @()
     Write-Host "Spojení OK (signatura ATtiny1624 = 1E 94 2A)." -ForegroundColor Green
+    return
+}
+
+# ---------------------------------------------------------------- diagnostika
+# Záznam diagnostického firmwaru (src\diag.c) v EEPROM od 0xC0:
+#   magic "DIAG" u32 | cycles u16 | heard_total u16 | heard_best i8 | pkt[23] | crc16
+# pkt = testovací paket DIAG (0x17), stejný jako čidlo vysílá (nikdo ho nezpracovává).
+function Get-Crc16([byte[]]$d, [int]$off, [int]$n) {
+    $crc = 0xFFFF
+    for ($i = 0; $i -lt $n; $i++) {
+        $crc = $crc -bxor ([int]$d[$off + $i] -shl 8)
+        for ($b = 0; $b -lt 8; $b++) {
+            if ($crc -band 0x8000) { $crc = (($crc -shl 1) -bxor 0x1021) -band 0xFFFF } else { $crc = ($crc -shl 1) -band 0xFFFF }
+        }
+    }
+    return $crc
+}
+
+function Show-Diagnostika([byte[]]$ee) {
+    $i8 = { param($v) if ($v -ge 128) { $v - 256 } else { $v } }
+    $u16 = { param($o) [int]$ee[$o] + 256 * [int]$ee[$o + 1] }
+    $ano = { param($ok) if ($ok) { "ANO" } else { "NE" } }
+    $base = 0xC0
+    $magic = [System.Text.Encoding]::ASCII.GetString($ee, $base, 4)
+    # klíč párování normálního firmwaru: 2 kopie po 59 B, magic "ANM1" + příznak spárováno
+    $key = $false
+    foreach ($a in @(0, 59)) {
+        if ([System.Text.Encoding]::ASCII.GetString($ee, $a, 4) -eq "ANM1" -and $ee[$a + 4] -eq 1) { $key = $true }
+    }
+    Write-Host ""
+    if ($magic -ne "DIAG") {
+        Write-Host "V čidle není záznam diagnostiky." -ForegroundColor Yellow
+        Write-Host "  • nahrajte diagnostický firmware (5-diagnostika.cmd) a nechte čidlo aspoň 30 s běžet,"
+        Write-Host "  • když už nahraný je a záznam pořád chybí, čip se po startu hned restartuje (napájení!)."
+        Write-Host ("Párovací klíč v EEPROM: " + $(if ($key) { "ANO (čidlo je spárované)" } else { "NE" }))
+        return
+    }
+    $n = 34
+    $crc = Get-Crc16 $ee $base ($n - 2)
+    if ($crc -ne (& $u16 ($base + $n - 2))) {
+        Write-Host "Záznam diagnostiky je poškozený (čtení během zápisu?) – zkuste vyčíst znovu." -ForegroundColor Yellow
+        return
+    }
+    $cycles = & $u16 ($base + 4)
+    $heardTotal = & $u16 ($base + 6)
+    $heardBest = & $i8 $ee[$base + 8]
+    $p = $base + 9
+    $id = "{0:X4}" -f (& $u16 ($p + 1))
+    $rst = $ee[$p + 5]
+    $vbat = & $u16 ($p + 6)
+    $temp = & $i8 $ee[$p + 8]
+    $part = $ee[$p + 9]; $ver = $ee[$p + 10]; $f = $ee[$p + 11]
+    $marc = $ee[$p + 12]; $fscal = $ee[$p + 13]
+    $pulses = & $u16 ($p + 14)
+    $heard = $ee[$p + 16]; $bad = $ee[$p + 17]
+    $best = & $i8 $ee[$p + 18]; $floor = & $i8 $ee[$p + 19]
+    $ltype = $ee[$p + 20]; $lid = "{0:X4}" -f (& $u16 ($p + 21))
+    $so = ($f -band 0x01) -ne 0; $spi = ($f -band 0x02) -ne 0; $pll = ($f -band 0x04) -ne 0
+    $gdo = ($f -band 0x08) -ne 0; $txok = ($f -band 0x10) -ne 0
+    $reed = ($f -band 0x80) -ne 0
+    $why = @()
+    if ($rst -band 0x01) { $why += "zapnutí napájení" }
+    if ($rst -band 0x02) { $why += "PODPĚTÍ (brown-out)" }
+    if ($rst -band 0x08) { $why += "watchdog" }
+    if ($rst -band 0x10) { $why += "software" }
+    if ($rst -band 0x20) { $why += "programátor (UPDI)" }
+    if ($rst -band 0x04) { $why += "pin RESET" }
+    $types = @{ 0x03 = "retenčka"; 0x04 = "retenčka"; 0x05 = "retenčka"; 0x06 = "retenčka";
+                0x13 = "data anemometru"; 0x14 = "párování anemometru"; 0x17 = "test jiného anemometru" }
+    $tname = if ($types.ContainsKey([int]$ltype)) { $types[[int]$ltype] } else { "neznámý" }
+
+    Write-Host ("Diagnostika čidla – poslední záznam (cyklus $cycles, běží asi {0} min)" -f [math]::Round($cycles * 6 / 60)) -ForegroundColor Cyan
+    Write-Host ("  ID čidla:               $id")
+    Write-Host ("  Poslední restart:       " + $(if ($why) { $why -join ", " } else { "–" }))
+    Write-Host ("  Baterie:                " + $(if ($vbat -eq 0xFFFF) { "chyba měření" } else { "{0:N3} V" -f ($vbat / 1000.0) }))
+    Write-Host ("  Teplota čipu:           " + $(if ($temp -eq -128) { "–" } else { "$temp °C" }))
+    Write-Host ("  Párovací klíč v EEPROM: " + $(if ($key) { "ANO – hub musí mít čidlo spárované" } else { "NE – čidlo s normálním firmwarem nabízí párování" }))
+    Write-Host ("  Kontakt anemometru:     " + $(if ($reed) { "sepnutý" } else { "rozepnutý" }) + ", pulzů od startu diagnostiky: $pulses")
+    Write-Host "Rádio CC1101" -ForegroundColor Cyan
+    Write-Host ("  Odpovídá (SO, krystal): " + (& $ano $so))
+    Write-Host ("  PARTNUM / VERSION:      0x{0:X2} / 0x{1:X2}" -f $part, $ver)
+    Write-Host ("  Zápis a čtení registru: " + (& $ano $spi))
+    Write-Host ("  PLL zamčená:            " + (& $ano $pll) + ("  (MARCSTATE 0x{0:X2}, FSCAL1 0x{1:X2})" -f $marc, $fscal))
+    Write-Host ("  Vysílání dokončeno:     " + (& $ano $txok))
+    Write-Host ("  GDO0 při vysílání:      " + (& $ano $gdo))
+    Write-Host "Příjem na čidle (2 s poslechu v každém cyklu)" -ForegroundColor Cyan
+    Write-Host ("  Šum kanálu:             " + $(if ($floor -eq -128) { "–" } else { "$floor dBm" }))
+    Write-Host ("  Zachyceno od startu:    $heardTotal paketů" + $(if ($heardTotal) { ", nejsilnější $heardBest dBm" } else { "" }))
+    Write-Host ("  V posledním cyklu:      $heard (chybných $bad)" + $(if ($heard) { ", poslední: $tname (0x{0:X2}) od $lid" -f $ltype } else { "" }))
+
+    $tips = @()
+    if (-not $so) {
+        $tips += "Rádio vůbec neodpovídá: napájení modulu CC1101, spoje CSn (PA4) a SO/MISO (PA2), krystal 26 MHz."
+    } else {
+        if (-not $spi) { $tips += "Rádio odpovídá, ale zápis/čtení registru nesedí: spoje SI/MOSI (PA1) a SCLK (PA3), studený spoj." }
+        if ($part -ne 0x00 -or ($ver -ne 0x14 -and $ver -ne 0x04)) { $tips += "Neobvyklé PARTNUM/VERSION – čip nejspíš není CC1101 nebo SPI čte nesmysly." }
+        if (-not $pll) { $tips += "Syntezátor se nezamkl: krystal 26 MHz (a jeho kondenzátory), napájení rádia." }
+        if (-not $txok) { $tips += "Vysílání se nedokončilo: rádio zůstalo ve vysílání – napájení při zátěži (~30 mA), PLL." }
+        if ($txok -and -not $gdo) { $tips += "GDO0 (PB2) se při vysílání nehnul: přerušený spoj GDO0 – čidlo pak NEPOZNÁ odpověď hubu (párování nefunguje)." }
+        if ($floor -gt -80) { $tips += "Vysoký šum na kanálu ($floor dBm): rušení v okolí nebo zvlněné napájení rádia." }
+        if ($heardTotal -eq 0 -and $cycles -ge 50) {
+            $tips += ("Za ~5 min poslechu čidlo nezachytilo žádný paket. Pokud v dosahu vysílá jiné čidlo (druhý anemometr`n" +
+                      "     každou minutu, čidla retenčky každých 5 min), nefunguje příjem: anténa, krystal, spoj GDO0 (PB2).")
+        } elseif ($heardTotal -eq 0) {
+            $tips += "Zatím nic nezachyceno – nechte diagnostiku běžet aspoň 5 minut a vyčtěte znovu."
+        }
+        if ($heardTotal -gt 0 -and $heardBest -lt -95) { $tips += "Ostatní čidla slyší jen slabě (nejvýš $heardBest dBm) – anténa nebo dosah." }
+    }
+    if ($rst -band 0x02) { $tips += "Restart kvůli podpětí: baterie nebo napájení z programátoru nestačí na vysílání." }
+    if ($vbat -ne 0xFFFF -and $vbat -lt 3000) { $tips += "Napětí pod 3,0 V – normální firmware by se vypnul." }
+    Write-Host ""
+    if ($tips) {
+        Write-Host "Co zkontrolovat:" -ForegroundColor Yellow
+        $tips | ForEach-Object { Write-Host "  • $_" }
+    } else {
+        Write-Host "Rádio i deska v pořádku – čidlo vysílá i přijímá." -ForegroundColor Green
+    }
+    Write-Host ""
+    Write-Host "Zpět na normální firmware: 3-aktualizace-firmwaru.cmd (párování zůstane)."
+}
+
+if ($Cti) {
+    New-Item -ItemType Directory -Force build | Out-Null
+    $bin = Join-Path (Get-Location) "build\eeprom-diag.bin"
+    if (Test-Path $bin) { Remove-Item $bin }
+    Invoke-Avrdude @("-U", "eeprom:r:${bin}:r")
+    Show-Diagnostika ([System.IO.File]::ReadAllBytes($bin))
+    return
+}
+
+if ($Diagnostika) {
+    $Port = Get-Port
+    $hex = Get-Firmware "diag" @("diag", "power", "adc", "wind", "cc1101") @("-DCC1101_DIAG")
+    $extra = @()
+    if ($Fuses) { $extra += @("-U", "fuse1:w:0x04:m", "-U", "fuse2:w:0x02:m", "-U", "fuse5:w:0xC5:m") }
+    Invoke-Avrdude ($extra + @("-U", "flash:w:${hex}:i"))
+    Write-Host ""
+    Write-Host "Diagnostický firmware běží: každých ~6 s otestuje rádio a desku." -ForegroundColor Green
+    Write-Host "  • nechte čidlo běžet aspoň 5 minut (poslouchá ostatní čidla v dosahu),"
+    Write-Host "  • výsledek z čidla: 6-precist-diagnostiku.cmd (vyčtení čidlo restartuje, test začne znovu),"
+    Write-Host "  • zpět: 3-aktualizace-firmwaru.cmd – párování v čidle zůstává."
     return
 }
 

@@ -90,4 +90,35 @@ extern bool cc1101_sleep_ok;
 
 int8_t cc1101_send(const uint8_t *tx, uint8_t txlen, uint8_t *rx, uint8_t rxmax, uint16_t rx_window_ms);
 
+/** Diagnostic build only (-DCC1101_DIAG): true when GDO0 (PB2) went high during the last transmission of cc1101_send –
+ *  the radio signals "sync word sent", so the GDO0 line to the MCU works. */
+extern bool cc1101_gdo0_seen;
+
+/* -------------------- diagnostics (diag.c only, built with -DCC1101_DIAG) */
+typedef struct {
+    bool    so_ready;       /**< SO went low after CSn: chip answers, crystal runs */
+    bool    spi_rw;         /**< register write + read back matched (MOSI/MISO/SCK/CSn ok) */
+    bool    pll_lock;       /**< synthesizer locked after a manual calibration */
+    uint8_t partnum;        /**< 0x00 for a CC1101 */
+    uint8_t version;        /**< 0x14 (or 0x04 on old chips) */
+    uint8_t marcstate;      /**< state after the calibration (0x01 = IDLE) */
+    uint8_t fscal1;         /**< 0x3F = no lock */
+} cc1101_probe_t;
+
+typedef struct {
+    uint8_t  count;         /**< CRC-valid packets received */
+    uint8_t  errors;        /**< packets with a bad CRC or length */
+    int8_t   best_dbm;      /**< strongest packet, -128 = none */
+    int8_t   floor_dbm;     /**< channel noise at the start of the listen */
+    uint8_t  last_type;     /**< first byte of the last good packet */
+    uint16_t last_id;       /**< bytes 1..2 (node ID in all our packet types) */
+} cc1101_heard_t;
+
+/** Reset, identify and fully configure the radio, test the SPI bus and the PLL,
+ *  then leave the radio configured in SLEEP (ready for cc1101_send). */
+void cc1101_probe(cc1101_probe_t *p);
+
+/** Listen `ms` milliseconds and count every packet on the channel (any sender). */
+void cc1101_listen(uint16_t ms, cc1101_heard_t *h);
+
 #endif /* CC1101_H_ */

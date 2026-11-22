@@ -25,3 +25,5 @@ make test       # test kryptografie + logiky čítání pulzů na PC
 | `2-novy-cip.cmd` | nový čip: fuses + firmware |
 | `3-aktualizace-firmwaru.cmd` | jen firmware (párování zůstane) |
 | `4-smazat-parovani.cmd` | smaže klíč v EEPROM |
+| `5-diagnostika.cmd` | nahraje diagnostický firmware (test rádia a desky), viz [diagnostika.md](diagnostika.md) |
+| `6-precist-diagnostiku.cmd` | vyčte z čidla výsledek diagnostiky a vysvětlí ho |

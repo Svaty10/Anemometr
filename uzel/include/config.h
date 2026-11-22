@@ -134,6 +134,10 @@
 #define PKT_PAIR_LEN            35U     /**< PAIR_ACK */
 #define PKT_PAIR_REQ_LEN        36U
 #define PKT_UNPAIR_LEN          19U
+/** Diagnostic firmware only (diag.c, docs/diagnostika.md): plain test transmission,
+ *  nobody answers it (the tank hub counts it as a foreign packet). */
+#define PKT_DIAG                0x17
+#define PKT_DIAG_LEN            23U
 #define PAIR_REQ_PAIRED         0x01
 #define PKT_MAC_LEN             4U
 #define FW_VERSION              10U     /**< 1.0 – reported in every packet */

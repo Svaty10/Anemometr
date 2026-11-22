@@ -45,7 +45,7 @@ else
   RUN   = ./$(1)
 endif
 
-.PHONY: all clean flash fuses size test
+.PHONY: all clean flash fuses size test diag flash-diag
 
 all: $(BUILD_DIR)/firmware.hex $(BUILD_DIR)/firmware.lss size
 
@@ -64,6 +64,27 @@ $(BUILD_DIR)/firmware.lss: $(BUILD_DIR)/firmware.elf
 
 size: $(BUILD_DIR)/firmware.elf
 	$(SIZE) $<
+
+# diagnostic firmware (src/diag.c, docs/diagnostika.md): radio/board self-test
+# (own objects with -DCC1101_DIAG: the normal firmware stays byte for byte the same)
+DIAG_SRCS = src/diag.c src/power.c src/adc.c src/wind.c src/cc1101.c
+DIAG_OBJS = $(patsubst src/%.c,$(BUILD_DIR)/diag-%.o,$(DIAG_SRCS))
+
+diag: $(BUILD_DIR)/diag.hex
+
+$(BUILD_DIR)/diag-%.o: src/%.c include/*.h
+	@$(MKDIR)
+	$(CC) $(CFLAGS) -DCC1101_DIAG -c $< -o $@
+
+$(BUILD_DIR)/diag.elf: $(DIAG_OBJS)
+	$(CC) $(LDFLAGS) $(DIAG_OBJS) -o $@
+
+$(BUILD_DIR)/diag.hex: $(BUILD_DIR)/diag.elf
+	$(OBJCOPY) -O ihex -R .eeprom -R .fuse -R .lock -R .signature $< $@
+	$(SIZE) $<
+
+flash-diag: $(BUILD_DIR)/diag.hex
+	$(AVRDUDE) -c $(PROGRAMMER) -p t1624 -P $(PORT) -b $(BAUD) -U flash:w:$<:i
 
 flash: $(BUILD_DIR)/firmware.hex
 	$(AVRDUDE) -c $(PROGRAMMER) -p t1624 -P $(PORT) -b $(BAUD) -U flash:w:$<:i

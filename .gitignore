@@ -1,6 +1,7 @@
 # Build (AVR) – kromě hotového firmwaru, který se nahrává do čidla
 uzel/build/*
 !uzel/build/firmware.hex
+!uzel/build/diag.hex
 *.elf
 *.lss
 *.map
