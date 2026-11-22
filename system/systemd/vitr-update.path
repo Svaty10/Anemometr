@@ -1,0 +1,9 @@
+[Unit]
+Description=Vítr – ruční žádost o aktualizaci z webu
+
+[Path]
+PathExists=/var/lib/vitr/update-request
+Unit=vitr-update.service
+
+[Install]
+WantedBy=multi-user.target

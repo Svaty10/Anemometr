@@ -73,8 +73,12 @@ Na Raspberry Pi s retenčkou (retenčka se nemění, most přidá instalace vitr
 [docs/instalace.md](docs/instalace.md):
 
 ```bash
-git clone https://github.com/Svaty10/Anemometr.git ~/Anemometr && cd ~/Anemometr && sudo bash system/install.sh
+curl -fsSL https://raw.githubusercontent.com/Svaty10/Anemometr/main/system/bootstrap.sh | sudo bash
 ```
+
+Další verze si vitr **aktualizuje sám** z GitHub Releases jako retenčka (podepsané balíky,
+Nastavení → Systém, automaticky v noci, návrat na předchozí verzi, když nová nenaběhne);
+vydání: [docs/vydani.md](docs/vydani.md).
 
 Web anemometrů pak běží na `http://<pi>:8080` (retenčka dál na portu 80). **Uživatelské účty
 jako u retenčky**: první přihlášení `admin` + kód z instalace → vlastní účet administrátora,

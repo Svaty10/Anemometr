@@ -19,7 +19,7 @@ import signal
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__, updates
 from .core import Core
 from .db import Database
 from .mqtt import Mqtt
@@ -92,6 +92,29 @@ async def main() -> None:
     app = App(core, db, mqtt, static_dir, bridge_ok, str(data_dir))
     web = start_web(app, env("VITR_BIND", "0.0.0.0"), int(env("VITR_WEB_PORT", "8080")))
 
+    def health() -> None:
+        try:
+            updates.write_health(str(data_dir), __version__, bridge_ok())
+        except OSError:
+            log.exception("health.json not written")
+
+    async def housekeeping() -> None:
+        """health.json for the updater, audit of update results, finished unpairings."""
+        while True:
+            health()
+            try:
+                ev = updates.audit_event(updates.read_status(str(data_dir)), db.get("update_audit_key"))
+                if ev is not None:
+                    key, action, detail = ev
+                    db.set("update_audit_key", key)
+                    core.audit(action, detail)
+                with core.lock:
+                    core.unpair_tick()
+            except Exception:
+                log.exception("housekeeping failed")
+            await asyncio.sleep(30)
+
+    health()                                      # the updater waits for this after a restart
     stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -99,8 +122,10 @@ async def main() -> None:
         except (NotImplementedError, RuntimeError):     # Windows (development)
             pass
     task = asyncio.ensure_future(mqtt.run())
+    hk = asyncio.ensure_future(housekeeping())
     await stop.wait()
     task.cancel()
+    hk.cancel()
     web.shutdown()
     db.close()
 

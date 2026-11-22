@@ -11,7 +11,7 @@ Group=vitr
 EnvironmentFile=-/etc/default/vitr
 Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 VITR_DATA=/var/lib/vitr
 Environment=MALLOC_ARENA_MAX=2
-WorkingDirectory=/opt/vitr/server
+WorkingDirectory=/opt/vitr/current/server
 ExecStart=/usr/bin/python3 -m vitr
 Restart=always
 RestartSec=3

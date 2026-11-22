@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, auth
+from . import __version__, auth, updates
 from .core import MAX_NODES
 
 log = logging.getLogger("vitr.web")
@@ -60,7 +60,9 @@ AUDIT_CATEGORIES = {
     "sensors": ["NODE_PAIRED", "NODE_PAIRING", "NODE_PAIRING_CANCELLED", "NODE_REMOVED",
                 "NODE_UNPAIR_REQUESTED", "NODE_UNPAIR_CANCELLED", "NODE_UNPAIRED", "CALIBRATION"],
     "settings": ["SETTINGS_CHANGED", "CALIBRATION"],
-    "problems": ["LOGIN_FAILED", "SETUP_FAILED"],
+    "system": ["UPDATE_REQUESTED", "UPDATE_AVAILABLE", "UPDATE_INSTALLED", "UPDATE_ROLLED_BACK",
+               "UPDATE_ERROR", "UPDATE_UP_TO_DATE"],
+    "problems": ["LOGIN_FAILED", "SETUP_FAILED", "UPDATE_ROLLED_BACK", "UPDATE_ERROR"],
 }
 
 
@@ -386,6 +388,9 @@ def make_handler(app: App):
             if p == "/api/state":
                 self._need()
                 return self._json(app.overview())
+            if p == "/api/update/status":
+                self._need("admin")
+                return self._json(updates.summary(str(app.data_dir), __version__))
             if p == "/api/nodes":
                 self._need("admin")
                 return self._json(app.nodes_page())
@@ -608,6 +613,35 @@ def make_handler(app: App):
         # --------------------------------------------------- admin actions
         def _admin(self, p: str, s: dict, b: dict) -> None:
             core, me, ip = app.core, s["username"], self._ip()
+            if p in ("/api/update/check", "/api/update/install"):
+                # the root updater (system/bin/vitr-update.py) is driven by files in the data
+                # directory (updates.py); a check never installs, install is a separate request
+                dd = str(app.data_dir)
+                action, ver = "check", None
+                if p == "/api/update/install":
+                    action, ver = "install", b.get("version")
+                    if not updates.valid_version(ver):
+                        return self._err(400, "Neplatná verze.")
+                    st0 = updates.read_status(dd) or {}
+                    if st0.get("state") not in ("available", "error", "rolled_back") or st0.get("latest") != ver:
+                        return self._err(409, "Tato verze není k dispozici – nejprve zkontrolujte aktualizace.")
+                st = updates.read_status(dd)
+                if updates.busy(st) and (action == "install" or st.get("state") != "checking"):
+                    return self._err(409, "Aktualizace právě probíhá.")
+                try:
+                    updates.request(dd, action, ver)
+                except OSError:
+                    return self._err(500, "Žádost se nepodařilo uložit.")
+                core.audit("UPDATE_REQUESTED", f"Instalace verze {ver}" if ver else "Ruční kontrola aktualizací", me, ip)
+                return self._json({"ok": True, **updates.summary(dd, __version__)})
+            if p == "/api/update/prefs":
+                try:
+                    pr = updates.write_prefs(str(app.data_dir), b.get("auto"), b.get("channel"))
+                except OSError:
+                    return self._err(500, "Nastavení se nepodařilo uložit.")
+                core.audit("SETTINGS_CHANGED", "Aktualizace: " + ("automaticky" if pr["auto"] else "jen ručně")
+                           + (", kanál beta" if pr["channel"] == "beta" else ""), me, ip)
+                return self._json({"ok": True, "prefs": pr})
             if p == "/api/pairing/start":
                 nid = parse_node_id(b.get("node_id"))
                 if core.node(nid) is None and len(core.nodes()) >= MAX_NODES:

@@ -10,7 +10,7 @@ zařízení v Home Assistantu. Retenčka se kvůli tomu nijak nemění (viz odd�
 Retenčka se kvůli anemometrům **nijak nemění** – ani její repozitář, ani nainstalované soubory,
 a dál se normálně aktualizuje. Instalace vitru jí přidá jen doplněk služby
 (`/etc/systemd/system/retencka.service.d/vitr-most.conf`), který při startu retenčky načte most
-z `/usr/local/lib/vitr-most/`. Most pakety anemometrů (typy 0x13–0x16) pošle přes
+z nainstalované verze vitru (`/opt/vitr/current/system/retencka-most/`). Most pakety anemometrů (typy 0x13–0x16) pošle přes
 `127.0.0.1:47613` vitru a odvysílá jeho odpověď na párování; pakety nádrží jdou beze změny dál.
 Doplněk přežije aktualizace retenčky. Kdyby se rádio v nové verzi retenčky změnilo tak, že most
 nesedí, most se nepřipojí a retenčka běží jako bez něj (v logu `… bridge NOT active`).
@@ -25,25 +25,34 @@ journalctl -u retencka -b | grep vitr-most
 Nastavení → Diagnostika → *Rádio (přes retenčku): data chodí* (jakmile vysílá aspoň jeden
 anemometr).
 
-Odebrání mostu (retenčka bude přesně jako předtím): `sudo bash system/odinstalovat-most.sh`.
+Odebrání mostu (retenčka bude přesně jako předtím): `sudo bash /opt/vitr/current/system/odinstalovat-most.sh`.
 
 ## 2. Služba vitr
 
-Na Pi stáhnout repozitář a nainstalovat:
+Na Pi jedním příkazem (stejně jako retenčka):
 
 ```bash
-git clone https://github.com/Svaty10/Anemometr.git ~/Anemometr && cd ~/Anemometr && sudo bash system/install.sh
+curl -fsSL https://raw.githubusercontent.com/Svaty10/Anemometr/main/system/bootstrap.sh | sudo bash
 ```
 
-Aktualizace později:
+Skript stáhne repozitář do `/opt/vitr-src`, založí uživatele `vitr`, nainstaluje aplikaci do
+`/opt/vitr/releases/<verze>` (odkaz `/opt/vitr/current`), služby `vitr.service` a
+`vitr-update.path/.timer`, připojí most k retenčce, ověří, že nová verze běží (jinak vrátí
+předchozí), a vypíše adresu webu a **kód pro první přihlášení**. Data v `/var/lib/vitr` zůstávají.
 
-```bash
-cd ~/Anemometr && git pull && sudo bash system/install.sh
-```
+### Aktualizace (stejně jako u retenčky)
 
-Skript založí uživatele `vitr`, nainstaluje aplikaci do `/opt/vitr`, službu `vitr.service`,
-spustí ji a vypíše adresu webu a **kód pro první přihlášení**. Data v `/var/lib/vitr` při
-aktualizaci zůstávají.
+Další verze si vitr stahuje sám z **GitHub Releases** – podepsané balíky, ověřené klíčem
+`/etc/vitr/release.pub`. Na webu **Nastavení → Systém**:
+
+- *Zkontrolovat aktualizace* → dialog s poznámkami k vydání → *Aktualizovat na X* (průběh:
+  stahuji → ověřuji podpis → instaluji → restartuji); u **Nastavení** svítí tečka, když je nová verze;
+- *Automatické aktualizace* (v noci kolem 4:00) a kanál *Stabilní / Beta*;
+- když nová verze nenaběhne, vitr se sám vrátí na předchozí i s databází a verzi si zablokuje.
+
+Výsledky jsou v Historii událostí (kategorie Systém), podrobnosti `journalctl -u vitr-update`.
+Ruční přeinstalace (např. vývojová verze z `main`): znovu příkaz `curl … | sudo bash` výše.
+Postup vydání nové verze: [vydani.md](vydani.md).
 
 ### Uživatelé (stejně jako u retenčky)
 

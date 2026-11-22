@@ -1,0 +1,19 @@
+[Unit]
+Description=Vítr – kontrola a instalace aktualizací
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/vitr/current/system/bin/vitr-update.py
+TimeoutStartSec=15min
+Nice=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/vitr /var/lib/vitr /etc/systemd/system
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

@@ -39,6 +39,9 @@
         <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="9" r="3.2"/><path d="M3 19c1-3 3.2-4.5 6-4.5s5 1.5 6 4.5"/><path d="M15.5 6a3 3 0 0 1 0 6M17.5 14.8c1.7.6 2.9 2 3.5 4.2"/></symbol>
         <symbol id="i-ruler" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="1"/><path d="M7 8v3M11 8v4M15 8v3"/></symbol>
         <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/></symbol>
+        <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+        <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></symbol>
+        <symbol id="i-restart" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19.2 4.5V8h-3.5"/></symbol>
         <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
         <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
     </defs>
@@ -52,7 +55,7 @@
         </div>
         <nav class="main-nav" aria-label="Hlavní navigace">
             <button class="nav-tab active" data-tab="dashboard" type="button">Přehled</button>
-            <button class="nav-tab admin-only hidden" data-tab="nastaveni" type="button">Nastavení</button>
+            <button class="nav-tab admin-only hidden" data-tab="nastaveni" type="button">Nastavení<span class="badge-dot hidden" id="menuUpdDot" title="K dispozici je aktualizace"></span></button>
             <button class="nav-tab admin-only hidden" data-tab="logovani" type="button">Historie událostí</button>
         </nav>
         <span class="status-pill" id="statusPill" role="status">Načítám…</span>
@@ -255,6 +258,32 @@
                 </section>
 
 
+                <section class="card" id="cardSys" data-nav="Systém" data-group="Systém">
+                    <div class="card-title">
+                        <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-clock"/></svg></span>
+                        <div><h2>Systém</h2><p class="card-desc">Verze a aktualizace (podepsané verze z GitHubu, stejně jako u retenčky).</p></div>
+                    </div>
+                    <dl class="kv" id="sysInfo"></dl>
+                    <h3>Aktualizace</h3>
+                    <div class="upd-line" id="sysUpdate"></div>
+                    <div class="upd-prefs">
+                        <label class="upd-pref">
+                            <span class="upd-pref-text"><span class="upd-pref-name">Automatické aktualizace</span>
+                                <span class="upd-pref-hint">Nová verze se nainstaluje v noci</span></span>
+                            <span class="switch"><input type="checkbox" class="upd-auto"><span class="slider"></span></span>
+                        </label>
+                        <label class="upd-pref">
+                            <span class="upd-pref-text"><span class="upd-pref-name">Kanál</span>
+                                <span class="upd-pref-hint">Beta dostává novinky dřív, může mít chyby</span></span>
+                            <select class="unified-select upd-channel-sel" aria-label="Kanál aktualizací">
+                                <option value="stable">Stabilní</option>
+                                <option value="beta">Beta</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="form-actions"><button class="btn btn-outline" id="updateBtn" type="button">Zkontrolovat aktualizace</button></div>
+                </section>
+
                 <section class="card" id="cardDiag" data-nav="Diagnostika" data-group="Systém">
                     <div class="card-title">
                         <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-bars"/></svg></span>
@@ -277,6 +306,7 @@
                     <button type="button" class="chip" data-cat="settings">Nastavení</button>
                     <button type="button" class="chip" data-cat="login">Přihlášení</button>
                     <button type="button" class="chip" data-cat="users">Uživatelé</button>
+                    <button type="button" class="chip" data-cat="system">Systém</button>
                     <button type="button" class="chip chip-danger" data-cat="problems">Problémy</button>
                 </div>
                 <div class="log-filters">
@@ -367,6 +397,36 @@
                 <p class="muted small mt-20" id="aboutLine"></p>
             </section>
         </div>
+    </div>
+</div>
+
+<!-- Dialog aktualizací (obsah kreslí app.js; texty z GitHubu jen přes textContent) -->
+<div class="modal-backdrop hidden" id="updModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="updTitle" tabindex="-1">
+        <div class="modal-head">
+            <h2 id="updTitle">Aktualizace</h2>
+            <button class="icon-btn" id="updClose" type="button" aria-label="Zavřít">
+                <svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="modal-body" id="updBody" aria-live="polite"></div>
+        <div class="modal-prefs">
+            <div class="upd-prefs">
+                <label class="upd-pref">
+                    <span class="upd-pref-text"><span class="upd-pref-name">Automatické aktualizace</span>
+                        <span class="upd-pref-hint">Nová verze se nainstaluje v noci</span></span>
+                    <span class="switch"><input type="checkbox" class="upd-auto"><span class="slider"></span></span>
+                </label>
+                <label class="upd-pref">
+                    <span class="upd-pref-text"><span class="upd-pref-name">Kanál</span>
+                        <span class="upd-pref-hint">Beta dostává novinky dřív, může mít chyby</span></span>
+                    <select class="unified-select upd-channel-sel" aria-label="Kanál aktualizací">
+                        <option value="stable">Stabilní</option>
+                        <option value="beta">Beta</option>
+                    </select>
+                </label>
+            </div>
+        </div>
+        <div class="modal-foot" id="updFoot"></div>
     </div>
 </div>
 

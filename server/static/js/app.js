@@ -524,7 +524,7 @@
         $('aboutLine').textContent = `Vítr ${ME.version}`;
         document.querySelectorAll('.admin-only').forEach((el) => el.classList.toggle('hidden', !ADMIN));
         document.querySelectorAll('.user-only').forEach((el) => el.classList.toggle('hidden', ADMIN));
-        if (ADMIN) { loadMqtt(); renderSettings(); buildSetNav(); }
+        if (ADMIN) { loadMqtt(); renderSettings(); buildSetNav(); if (!applyMe.upd) { applyMe.upd = true; bindUpdates(); } }
     }
 
     function editing(el) { return el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT'; }
@@ -551,6 +551,7 @@
         ];
         $('diagKv').innerHTML = kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
         $('mqStatus').textContent = 'Stav: ' + STATE.mqtt;
+        $('sysInfo').innerHTML = `<dt>Verze</dt><dd>Vítr ${esc(STATE.version)}</dd>`;
     }
 
     function nodeCard(n) {
@@ -978,6 +979,357 @@
         } catch (err) { toast(err.message, true); }
     });
 
+    // ------------------------------------------------------------ updates
+    // Dialog nad stránkou: kontrola → výběr → instalace s průběhem. Stav píše root updater
+    // do update-status.json, web ho čte přes /api/update/status (viz server/vitr/updates.py).
+    const UPD_STEPS = [['downloading', 'Stahuji'], ['verifying', 'Ověřuji podpis'], ['installing', 'Instaluji'], ['restarting', 'Restartuji']];
+    const UPD = {
+        open: false, mode: null, since: 0, target: null, timer: null, failSince: null,
+        last: null, opener: null, pendingSince: null
+    };
+
+    function fmtIsoDate(iso) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+        return m ? `${+m[3]}. ${+m[2]}. ${m[1]}` : '';
+    }
+
+    // Bezpečné vykreslení podmnožiny Markdownu (nadpisy, odrážky, odstavce, **tučně**, `kód`,
+    // [odkaz](https://…)) – jen createElement + textContent, nikdy innerHTML z cizího textu.
+    function mdInline(parent, text) {
+        const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\))/g;
+        let last = 0, m;
+        while ((m = re.exec(text))) {
+            if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+            const t = m[0];
+            if (t.startsWith('**')) {
+                const b = document.createElement('strong'); b.textContent = t.slice(2, -2); parent.appendChild(b);
+            } else if (t.startsWith('`')) {
+                const c = document.createElement('code'); c.textContent = t.slice(1, -1); parent.appendChild(c);
+            } else {
+                const mm = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(t);
+                if (mm && /^https:\/\//i.test(mm[2])) {
+                    const a = document.createElement('a');
+                    a.textContent = mm[1]; a.href = mm[2]; a.target = '_blank'; a.rel = 'noopener noreferrer';
+                    parent.appendChild(a);
+                } else parent.appendChild(document.createTextNode(mm ? mm[1] : t));
+            }
+            last = m.index + t.length;
+        }
+        if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+    }
+    function renderMarkdown(md) {
+        const root = document.createElement('div');
+        root.className = 'md';
+        let list = null, para = null;
+        String(md || '').split(/\r?\n/).forEach((raw) => {
+            const line = raw.trimEnd();
+            const h = /^(#{1,6})\s+(.*)$/.exec(line);
+            const li = /^\s*[-*+]\s+(.*)$/.exec(line);
+            if (!line.trim()) { list = null; para = null; return; }
+            if (h) {
+                list = null; para = null;
+                const el = document.createElement('h4');
+                mdInline(el, h[2]);
+                root.appendChild(el);
+            } else if (li) {
+                para = null;
+                if (!list) { list = document.createElement('ul'); root.appendChild(list); }
+                const el = document.createElement('li');
+                mdInline(el, li[1]);
+                list.appendChild(el);
+            } else if (list && /^\s{2,}/.test(raw)) {
+                list.lastChild.appendChild(document.createTextNode(' '));
+                mdInline(list.lastChild, line.trim());
+            } else {
+                list = null;
+                if (!para) { para = document.createElement('p'); root.appendChild(para); } else para.appendChild(document.createTextNode(' '));
+                mdInline(para, line.trim());
+            }
+        });
+        return root;
+    }
+
+    function el(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+    }
+    // Dialog se při čekání každou chvíli překreslí a nové kolečko by se roztočilo od nuly
+    // (trhaný skok). Všechna kolečka mají animaci ukotvenou na začátek časové osy dokumentu,
+    // takže nové pokračuje přesně v úhlu starého.
+    function spinnerEl() {
+        const sp = el('span', 'spinner');
+        queueMicrotask(() => {                       // to už je kolečko vložené do stránky
+            if (sp.getAnimations) sp.getAnimations().forEach((a) => { a.startTime = 0; });
+        });
+        return sp;
+    }
+
+    function updButton(label, cls, fn) {
+        const b = el('button', 'btn ' + cls, label);
+        b.type = 'button';
+        b.addEventListener('click', fn);
+        return b;
+    }
+
+    function updView(kind, sum) {
+        const body = $('updBody'), foot = $('updFoot');
+        body.textContent = '';
+        foot.textContent = '';
+        const st = (sum && sum.status) || {};
+        const running = (sum && sum.running) || ME.version;
+        const close = () => updButton('Zavřít', 'btn-outline', closeUpdateDialog);
+        $('updModal').classList.toggle('busy', kind === 'install' || kind === 'restart');
+        if (kind === 'checking') {
+            const row = el('div', 'upd-wait');
+            row.append(spinnerEl(), el('span', '', 'Hledám aktualizace…'));
+            body.appendChild(row);
+            foot.appendChild(close());
+        } else if (kind === 'up_to_date') {
+            body.appendChild(el('p', 'upd-big', `Máte nejnovější verzi ${running}.`));
+            if (st.updated_at) body.appendChild(el('p', 'muted small', 'Zkontrolováno ' + fmtDateTime(st.updated_at * 1000)));
+            foot.appendChild(close());
+        } else if (kind === 'available') {
+            const head = el('div', 'upd-avail');
+            head.appendChild(el('p', 'upd-big', `K dispozici je verze ${st.latest}`));
+            const meta = [`nainstalovaná ${running}`];
+            if (st.published_at) meta.push('vydáno ' + fmtIsoDate(st.published_at));
+            head.appendChild(el('p', 'muted small', meta.join(' · ')));
+            body.appendChild(head);
+            if (st.failed_before) body.appendChild(el('div', 'alert-warning', 'Tuto verzi se dříve nepodařilo spustit (vitr se vrátil k předchozí). Instalaci lze zkusit znovu.'));
+            if (st.message && /už není nejnovější/.test(st.message)) body.appendChild(el('div', 'alert-info', st.message));
+            const notes = Array.isArray(st.notes) ? st.notes : [];
+            if (notes.length) {
+                const box = el('div', 'upd-notes');
+                notes.forEach((n) => {
+                    if (!n || typeof n !== 'object') return;
+                    box.appendChild(el('h3', '', `Verze ${n.version}` + (n.date ? ' · ' + fmtIsoDate(n.date) : '')));
+                    box.appendChild(renderMarkdown(n.markdown));
+                });
+                body.appendChild(box);
+            } else body.appendChild(el('p', 'muted small', 'Poznámky k vydání nejsou k dispozici.'));
+            foot.append(updButton('Později', 'btn-outline', closeUpdateDialog),
+                updButton(`Aktualizovat na ${st.latest}`, 'btn-primary', () => startInstall(st.latest)));
+        } else if (kind === 'error') {
+            body.appendChild(el('div', 'alert-danger', st.message || 'Kontrola aktualizací selhala.'));
+            foot.append(close(), updButton('Zkusit znovu', 'btn-primary', () => openUpdateDialog('check')));
+        } else if (kind === 'install' || kind === 'restart') {
+            body.appendChild(el('p', 'upd-big', `Aktualizace na verzi ${UPD.target}`));
+            const ol = el('ol', 'upd-steps');
+            const idx = kind === 'restart' ? 3 : Math.max(0, UPD_STEPS.findIndex(([k]) => k === st.state));
+            UPD_STEPS.forEach(([, label], i) => {
+                const li = el('li', i < idx ? 'done' : i === idx ? 'active' : '');
+                li.appendChild(el('span', 'step-dot'));
+                li.appendChild(el('span', '', label));
+                if (i === idx) li.setAttribute('aria-current', 'step');
+                ol.appendChild(li);
+            });
+            body.appendChild(ol);
+            const msg = el('div', 'upd-wait');
+            msg.append(spinnerEl(), el('span', '', kind === 'restart' ? 'Čekám na restart…'
+                : (UPD_STEPS.some(([k]) => k === st.state) && st.message) || 'Připravuji instalaci…'));
+            body.appendChild(msg);
+            body.appendChild(el('p', 'muted small', 'Nezavírejte prosím stránku, vitr se během aktualizace krátce restartuje.'));
+        } else if (kind === 'done') {
+            body.appendChild(el('p', 'upd-big ok', `Aktualizováno na ${running}`));
+            body.appendChild(el('p', 'muted small', 'Načtěte stránku znovu, ať se použije nová verze webu.'));
+            foot.appendChild(updButton('Načíst znovu', 'btn-primary', () => window.location.reload()));
+        } else if (kind === 'failed') {
+            body.appendChild(el('div', 'alert-danger', st.message || 'Aktualizace se nezdařila.'));
+            body.appendChild(el('p', 'muted small', `Dál běží předchozí verze ${running}, data ani nastavení se nezměnila.`));
+            foot.append(close(), updButton('Zkusit znovu', 'btn-primary', () => openUpdateDialog('check')));
+        } else if (kind === 'timeout') {
+            body.appendChild(el('div', 'alert-danger', UPD.timeoutMsg || 'Služba aktualizací neodpovídá.'));
+            foot.append(close(), updButton('Zkusit znovu', 'btn-primary', () => openUpdateDialog('check')));
+        }
+        // po překreslení držet fokus v dialogu (po otevření na hlavní akci)
+        if (UPD.open && (UPD.needFocus || !$('updModal').contains(document.activeElement))) {
+            UPD.needFocus = false;
+            focusFirst();
+        }
+    }
+
+    function focusables() {
+        return Array.from($('updModal').querySelectorAll('button, [href], input, select, [tabindex]:not([tabindex="-1"])'))
+            .filter((e) => !e.disabled && e.offsetParent !== null);
+    }
+    function focusFirst() {
+        const f = $('updFoot').querySelector('.btn-primary') || $('updFoot').querySelector('button') || $('updClose');
+        (f || $('updModal').querySelector('.modal')).focus();
+    }
+
+    function viewFor(sum) {
+        const st = (sum && sum.status) || {};
+        const s = st.state;
+        if (UPD.mode === 'install') {
+            if (s === 'done' && sum.running === UPD.target) return 'done';
+            if (s === 'rolled_back' || (s === 'error' && (st.updated_at || 0) >= UPD.since - 1)) return 'failed';
+            if (s === 'restarting' || s === 'done') return 'restart';      // čeká se na novou verzi
+            return 'install';
+        }
+        if (UPD.mode === 'check' && ((st.updated_at || 0) < UPD.since - 1 || s === 'checking' || sum.pending)) return 'checking';
+        if (s === 'available') return 'available';
+        if (s === 'up_to_date') return 'up_to_date';
+        if (s === 'error' || s === 'rolled_back') return 'error';
+        if (s === 'done') return sum.running === st.current ? 'up_to_date' : 'available';
+        if (['downloading', 'verifying', 'installing', 'restarting'].includes(s) && sum.busy) {
+            UPD.mode = 'install'; UPD.target = st.target || st.latest; UPD.since = st.started_at || 0;
+            return 'install';
+        }
+        return s ? 'checking' : 'up_to_date';
+    }
+
+    async function updPoll() {
+        clearTimeout(UPD.timer);
+        if (!UPD.open) return;
+        let sum = null;
+        try {
+            const r = await fetch('/api/update/status', { credentials: 'same-origin' });
+            if (r.status === 401) { window.location.replace('/login'); return; }
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            sum = await r.json();
+        } catch (e) {
+            sum = null;
+        }
+        if (!UPD.open) return;
+        if (!sum) {                                   // server se restartuje
+            if (UPD.mode === 'install') {
+                UPD.failSince = UPD.failSince || Date.now();
+                if (Date.now() - UPD.failSince > 180000) {
+                    UPD.timeoutMsg = 'Vitr se po restartu neozval do 3 minut. Zkuste stránku načíst znovu za chvíli.';
+                    updView('timeout');
+                    return;
+                }
+                updView('restart', UPD.last);
+            }
+            UPD.timer = setTimeout(updPoll, 1500);
+            return;
+        }
+        UPD.failSince = null;
+        UPD.last = sum;
+        setUpdateBadge(sum);
+        const kind = viewFor(sum);
+        if (kind === 'checking' && sum.pending) {
+            UPD.pendingSince = UPD.pendingSince || Date.now();
+            if (Date.now() - UPD.pendingSince > 45000) {        // žádost nikdo nevyzvedl
+                UPD.timeoutMsg = 'Služba aktualizací na žádost nereaguje (vitr-update.path). Zkuste to později nebo zkontrolujte journalctl -u vitr-update.';
+                updView('timeout', sum);
+                return;
+            }
+        } else UPD.pendingSince = null;
+        updView(kind, sum);
+        if (['checking', 'install', 'restart'].includes(kind)) UPD.timer = setTimeout(updPoll, 1500);
+    }
+
+    async function openUpdateDialog(mode) {
+        const m = $('updModal');
+        if (!UPD.open) {
+            UPD.opener = document.activeElement;
+            m.classList.remove('hidden');
+            document.body.classList.add('modal-open');
+            UPD.open = true;
+            UPD.needFocus = true;
+        }
+        UPD.mode = mode;
+        UPD.failSince = null;
+        UPD.pendingSince = null;
+        if (mode === 'check') {
+            updView('checking');
+            UPD.since = Math.floor(Date.now() / 1000);
+            const r = await action(() => api('/api/update/check', {}));
+            if (!r) {                                  // 409 = právě probíhá → jen ukázat stav
+                UPD.mode = 'show';
+            }
+        }
+        updPoll();
+    }
+
+    async function startInstall(ver) {
+        UPD.target = ver;
+        UPD.mode = 'install';
+        UPD.since = Math.floor(Date.now() / 1000);
+        updView('install', { status: { state: 'downloading', message: 'Odesílám žádost…' } });
+        const r = await action(() => api('/api/update/install', { version: ver }));
+        if (!r) { UPD.mode = 'show'; }
+        updPoll();
+    }
+
+    function closeUpdateDialog() {
+        if (!UPD.open || $('updModal').classList.contains('busy')) return;
+        UPD.open = false;
+        clearTimeout(UPD.timer);
+        $('updModal').classList.add('hidden');
+        document.body.classList.remove('modal-open');
+        // řádek v kartě Systém se po zavření překreslí → fokus na stálé tlačítko
+        const back = UPD.opener && UPD.opener.isConnected && !$('sysUpdate').contains(UPD.opener) ? UPD.opener : $('updateBtn');
+        if (back && back.offsetParent !== null) back.focus(); else if (document.activeElement) document.activeElement.blur();
+        refreshUpdateStatus();
+    }
+
+    function setUpdateBadge(sum) {
+        const st = (sum && sum.status) || {};
+        const avail = st.state === 'available' && st.latest && st.latest !== (sum.running || ME.version);
+        $('menuUpdDot').classList.toggle('hidden', !avail);
+        renderUpdateLine(sum);
+        applyUpdatePrefs(sum && sum.prefs);
+    }
+
+    function renderUpdateLine(sum) {
+        const box = $('sysUpdate');
+        if (!box) return;
+        box.textContent = '';
+        const st = (sum && sum.status) || {};
+        const when = st.updated_at || st.checked_at;
+        if (st.state === 'available' && st.latest) {
+            const row = el('div', 'upd-avail-line');
+            row.appendChild(el('span', 'badge-dot'));
+            row.appendChild(el('strong', '', `K dispozici verze ${st.latest}`));
+            row.appendChild(updButton('Zobrazit', 'btn-primary btn-sm', () => openUpdateDialog('show')));
+            box.appendChild(row);
+        }
+        const last = !when ? 'Zatím nekontrolováno.'
+            : `Poslední kontrola ${fmtDateTime(when * 1000)}: ${st.message || st.state || ''}`;
+        box.appendChild(el('p', 'muted small', last));
+    }
+
+    function applyUpdatePrefs(p) {
+        if (!p) return;
+        document.querySelectorAll('.upd-auto').forEach((c) => { c.checked = !!p.auto; });
+        document.querySelectorAll('.upd-channel-sel').forEach((s) => { s.value = p.channel; });
+    }
+
+    async function refreshUpdateStatus() {
+        if (ME.role !== 'admin') return;
+        try { setUpdateBadge(await api('/api/update/status')); } catch (e) { /* ignore */ }
+    }
+
+    function bindUpdates() {
+        $('updateBtn').addEventListener('click', () => openUpdateDialog('check'));
+        $('updClose').addEventListener('click', closeUpdateDialog);
+        $('updModal').addEventListener('mousedown', (e) => { if (e.target === $('updModal')) closeUpdateDialog(); });
+        $('updModal').addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeUpdateDialog(); return; }
+            if (e.key !== 'Tab') return;
+            const f = focusables();
+            if (!f.length) return;
+            const i = f.indexOf(document.activeElement);
+            if (e.shiftKey && (i <= 0)) { e.preventDefault(); f[f.length - 1].focus(); }
+            else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
+        });
+        const save = (src) => {
+            const box = src.closest('.upd-prefs');
+            const auto = box.querySelector('.upd-auto').checked;
+            const channel = box.querySelector('.upd-channel-sel').value;
+            action(() => api('/api/update/prefs', { auto, channel }),
+                auto ? 'Aktualizace se budou instalovat automaticky v noci.' : 'Aktualizace jen ručně.')
+                .then((r) => { if (r) applyUpdatePrefs(r.prefs); else refreshUpdateStatus(); });
+        };
+        document.querySelectorAll('.upd-auto, .upd-channel-sel').forEach((c) => c.addEventListener('change', () => save(c)));
+        refreshUpdateStatus();
+        setInterval(() => { if (!document.hidden && !UPD.open) refreshUpdateStatus(); }, 60000);
+    }
+
     // ---------------------------------------------------------- historie událostí
     // [ikona, text, závažnost]  závažnost: '' | ok | warn | bad | info
     const ACTIONS = {
@@ -990,7 +1342,10 @@
         NODE_PAIRED: ['antenna', 'Čidlo spárováno', 'ok'], NODE_PAIRING: ['antenna', 'Čekání na párování', ''],
         NODE_PAIRING_CANCELLED: ['antenna', 'Párování zrušeno', ''],
         NODE_REMOVED: ['antenna', 'Čidlo odebráno', 'warn'], NODE_UNPAIR_REQUESTED: ['antenna', 'Odpárování zahájeno', 'warn'],
-        NODE_UNPAIRED: ['antenna', 'Čidlo odpárováno', 'warn'], NODE_UNPAIR_CANCELLED: ['antenna', 'Odpárování zrušeno', '']
+        NODE_UNPAIRED: ['antenna', 'Čidlo odpárováno', 'warn'], NODE_UNPAIR_CANCELLED: ['antenna', 'Odpárování zrušeno', ''],
+        UPDATE_REQUESTED: ['arrow-up', 'Aktualizace', ''], UPDATE_AVAILABLE: ['arrow-up', 'Dostupná aktualizace', 'info'],
+        UPDATE_INSTALLED: ['check', 'Aktualizace nainstalována', 'ok'], UPDATE_ROLLED_BACK: ['restart', 'Aktualizace vrácena', 'bad'],
+        UPDATE_ERROR: ['alert', 'Chyba aktualizace', 'bad'], UPDATE_UP_TO_DATE: ['check', 'Bez aktualizace', '']
     };
     const LOG = { page: 1, cat: '', lastDay: null };
     const DAYS = ['neděle', 'pondělí', 'úterý', 'středa', 'čtvrtek', 'pátek', 'sobota'];
