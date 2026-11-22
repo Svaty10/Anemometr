@@ -3,6 +3,11 @@
 Formát dle [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), verze dle [SemVer](https://semver.org/).
 Postup vydání nové verze: [docs/vydani.md](docs/vydani.md).
 
+## [1.2.1] - 2026-11-22
+
+### Přidáno
+- Grafy větru (jednoho anemometru i všech) mají i krátké rozsahy **10 min** a **1 h**, s popisky osy po minutách. Každý bod je jedno skutečné minutové měření čidla, mezi body jsou rovné úsečky (bez vyhlazení). Graf baterie krátké rozsahy nemá – baterie se měří jednou za hodinu.
+
 ## [1.2.0] - 2026-11-22
 
 ### Přidáno

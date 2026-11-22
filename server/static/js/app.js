@@ -259,7 +259,10 @@
     // Stejně jako retenčka (1.23+): uprostřed grafu pevná svislá čára, tažením se data posouvají
     // pod ní, bublina nad grafem ukazuje hodnoty pod čarou; graf se otevře s posledním měřením
     // pod čarou. Starší data se dotahují po oknech délky zvoleného rozsahu.
-    const PRESETS = [['24h', '24 h', 86400], ['7d', '7 dní', 7 * 86400], ['30d', '30 dní', 30 * 86400], ['1y', 'rok', 365 * 86400]];
+    // krátké rozsahy (10 min, 1 h) jen u větru – baterie se měří jednou za hodinu
+    const PRESETS_ALL = [['10m', '10 min', 600], ['1h', '1 h', 3600], ['24h', '24 h', 86400], ['7d', '7 dní', 7 * 86400], ['30d', '30 dní', 30 * 86400], ['1y', 'rok', 365 * 86400]];
+    const FINE = ['10m', '1h'];
+    const presetsOf = (key) => (key === 'battery' ? PRESETS_ALL.filter((p) => !FINE.includes(p[0])) : PRESETS_ALL);
     const ranges = {};
     const charts = {};
 
@@ -267,13 +270,13 @@
         const key = el.dataset.chart;
         let saved = null;
         try { saved = localStorage.getItem('range:' + key); } catch (e) { /* ignore */ }
-        const initial = PRESETS.some((p) => p[0] === saved) ? saved : (el.dataset.default || '24h');
+        const initial = presetsOf(key).some((p) => p[0] === saved) ? saved : (el.dataset.default || '24h');
         ranges[key] = initial;
         const seg = document.createElement('div');
         seg.className = 'seg';
         seg.setAttribute('role', 'group');
         seg.setAttribute('aria-label', 'Rozsah');
-        PRESETS.forEach(([v, label]) => {
+        presetsOf(key).forEach(([v, label]) => {
             const b = document.createElement('button');
             b.type = 'button';
             b.textContent = label;
@@ -290,7 +293,7 @@
         el.appendChild(seg);
     }
     function rangeOf(key) {
-        const p = PRESETS.find((x) => x[0] === ranges[key]);
+        const p = PRESETS_ALL.find((x) => x[0] === ranges[key]);
         const to = Math.floor(Date.now() / 1000);
         return { from: to - (p ? p[2] : 86400), to, live: true };
     }
@@ -499,10 +502,14 @@
     // dílky časové osy na celé hodiny / půlnoc / začátek měsíce (místní čas)
     const MONTHS = ['led', 'úno', 'bře', 'dub', 'kvě', 'čvn', 'čvc', 'srp', 'zář', 'říj', 'lis', 'pro'];
     function timeTicks(fromMs, toMs, maxN) {
-        const H = 3600e3, D = 86400e3, span = toMs - fromMs, out = [];
+        const M = 60e3, H = 3600e3, D = 86400e3, span = toMs - fromMs, out = [];
+        const mins = [1, 2, 5, 10, 15, 30].find((m) => span / (m * M) <= maxN);
         const hours = [1, 2, 3, 6, 12].find((h) => span / (h * H) <= maxN);
         const days = [1, 2, 3, 7, 14].find((n) => span / (n * D) <= maxN);
-        if (hours) {
+        if (mins) {                                   // krátké rozsahy (10 min, 1 h): celé minuty
+            const step = mins * M;
+            for (let t = Math.ceil(fromMs / step) * step; t <= toMs; t += step) out.push({ value: t, unit: 'h' });
+        } else if (hours) {
             const d = new Date(fromMs);
             d.setMinutes(0, 0, 0);
             while (d.getTime() < fromMs || d.getHours() % hours) d.setHours(d.getHours() + 1);
@@ -607,8 +614,8 @@
             type: 'line',
             plugins: [scrubPlugin],
             data: { datasets: [
-                line(T.s1, Object.assign({ label: d.bucket ? 'Průměrná rychlost' : 'Rychlost', data: series(d.t, sp), backgroundColor: alpha(T.s1, 0.05), fill: 'origin', borderWidth: 2.5, spanGaps: false }, lastDot(sp, T.s1))),
-                line(T.s2, { label: d.bucket ? 'Nejsilnější náraz' : 'Náraz', data: series(d.t, gu), borderWidth: 1.5, spanGaps: false })
+                line(T.s1, Object.assign({ label: d.bucket ? 'Průměrná rychlost' : 'Rychlost', data: series(d.t, sp), backgroundColor: alpha(T.s1, 0.05), fill: 'origin', borderWidth: 2.5, spanGaps: false, tension: d.bucket ? 0.25 : 0 }, lastDot(sp, T.s1))),
+                line(T.s2, { label: d.bucket ? 'Nejsilnější náraz' : 'Náraz', data: series(d.t, gu), borderWidth: 1.5, spanGaps: false, tension: d.bucket ? 0.25 : 0 })
             ] },
             options: Object.assign(baseOpts(), {
                 plugins: {
@@ -671,7 +678,7 @@
         upsert('all', 'allChart', {
             type: 'line',
             plugins: [scrubPlugin],
-            data: { datasets: res.map(({ n, d, sp }, i) => line(pal[i % pal.length], { label: n.name, data: series(d.t, sp), spanGaps: false, ...lastDot(sp, pal[i % pal.length]) })) },
+            data: { datasets: res.map(({ n, d, sp }, i) => line(pal[i % pal.length], { label: n.name, data: series(d.t, sp), spanGaps: false, tension: d.bucket ? 0.25 : 0, ...lastDot(sp, pal[i % pal.length]) })) },
             options: Object.assign(baseOpts(), {
                 plugins: {
                     tooltip: { enabled: false },
