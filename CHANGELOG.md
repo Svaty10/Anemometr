@@ -8,6 +8,9 @@ Postup vydání nové verze: [docs/vydani.md](docs/vydani.md).
 ### Přidáno
 - **Logo vlevo nahoře vrací na přehled:** klik na ikonu větru s názvem otevře záložku *Přehled* z kterékoli jiné záložky (stejně jako v retenčce).
 
+### Plánováno (zatím není hotové, příští verze)
+- **Odhad výdrže baterie:** u čidla zobrazit, kolik dní baterie ještě vydrží (detail čidla, přehled, případně Home Assistant), stejně jako v retenčce. Počítat z energetického modelu, ne z trendu napětí (u Li-FeS2 je napětí skoro celou dobu ploché): kapacita podle typu baterie a jejího % × spotřeba čidla – klidový proud ve spánku, energie jednoho vysílání (paket každých ~60 s), poslech po vysílání a pull-up kontaktu, když miska stojí s magnetem nad jazýčkem. Vzor: `battery_days_left` v retenčce (`server/retencka/model.py`).
+
 ## [1.2.1] - 2026-11-22
 
 ### Přidáno
