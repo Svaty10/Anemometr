@@ -23,7 +23,7 @@ flowchart LR
 |---|---|
 | [`uzel/`](uzel/) firmware čidla | hotový, přeložený (`uzel/build/firmware.hex`, 10,4 kB), logika čítání otestovaná (`make test`); na desce zatím nevyzkoušený |
 | [`server/`](server/) služba `vitr` | hotová: párování, data, web :8080 ve stylu retenčky, MQTT do HA; testy `python -m unittest discover -s server/tests` |
-| most v retenčce | větev `anemometr-most` repozitáře retenčky, testy prošly |
+| most k retenčce | [`system/retencka-most/`](system/retencka-most/): doplněk služby retenčky, který instalace vitru přidá na Pi – retenčka se nemění |
 | [`docs/instalace.md`](docs/instalace.md) | postup instalace na Pi |
 | [`docs/deska.md`](docs/deska.md) | úprava osazení desky, zapojení RJ11, spotřeba |
 
@@ -57,9 +57,10 @@ pakety anemometru ignoruje a anemometr nikdy nepřijme párování od retenčky.
 
 ## Hub
 
-- **retencka** dál jediná ovládá CC1101. Rámce s typem 0x13–0x16 přepošle na
-  `127.0.0.1` (UDP) službě **vitr** a pošle do rádia, co jí vitr vrátí (PAIR_ACK/UNPAIR musí
-  odejít do 0,6 s – lokální UDP stačí).
+- **retencka** dál jediná ovládá CC1101 a její kód se nemění. Instalace vitru jí přidá
+  doplněk služby (systemd drop-in), který při startu připojí most: rámce s typem 0x13–0x16
+  přepošle na `127.0.0.1` (UDP) službě **vitr** a pošle do rádia, co jí vitr vrátí
+  (PAIR_ACK/UNPAIR musí odejít do 0,6 s – lokální UDP stačí). Přežije aktualizace retenčky.
 - **vitr** – samostatná služba (Python, jen stdlib jako retenčka): párování X25519, dešifrování,
   SQLite, web na **:8080** s uživatelskými účty jako retenčka (role, relace, CSRF, omezení pokusů, audit), MQTT Discovery do stejného Mosquitta (v HA se objeví zařízení
   „Anemometr 1/2“ – žádný další port pro HA).
@@ -68,7 +69,7 @@ pakety anemometru ignoruje a anemometr nikdy nepřijme párování od retenčky.
 
 ## Instalace
 
-Na Raspberry Pi s retenčkou (s mostem z větve `anemometr-most`), podrobně v
+Na Raspberry Pi s retenčkou (retenčka se nemění, most přidá instalace vitru), podrobně v
 [docs/instalace.md](docs/instalace.md):
 
 ```bash

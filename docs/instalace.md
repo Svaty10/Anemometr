@@ -3,23 +3,29 @@
 Anemometry využívají **rádio retenčky**: CC1101 ovládá jen služba `retencka`, pakety
 anemometrů (typy 0x13–0x16) předává mostem přes `127.0.0.1:47613` službě `vitr`.
 `vitr` je samostatná aplikace: vlastní databáze, web na portu **8080**, vlastní MQTT
-zařízení v Home Assistantu. Automaticky se neaktualizuje.
+zařízení v Home Assistantu. Retenčka se kvůli tomu nijak nemění (viz oddíl 1).
 
-## 1. Retenčka s mostem (jednou)
+## 1. Most k rádiu retenčky (dělá instalace vitru sama)
 
-Most je ve větvi **`anemometr-most`** repozitáře retenčky. Na Pi (ve složce s klonem
-repozitáře retenčky):
+Retenčka se kvůli anemometrům **nijak nemění** – ani její repozitář, ani nainstalované soubory,
+a dál se normálně aktualizuje. Instalace vitru jí přidá jen doplněk služby
+(`/etc/systemd/system/retencka.service.d/vitr-most.conf`), který při startu retenčky načte most
+z `/usr/local/lib/vitr-most/`. Most pakety anemometrů (typy 0x13–0x16) pošle přes
+`127.0.0.1:47613` vitru a odvysílá jeho odpověď na párování; pakety nádrží jdou beze změny dál.
+Doplněk přežije aktualizace retenčky. Kdyby se rádio v nové verzi retenčky změnilo tak, že most
+nesedí, most se nepřipojí a retenčka běží jako bez něj (v logu `… bridge NOT active`).
+
+Jak poznat, že most běží:
 
 ```bash
-git fetch origin anemometr-most
-git checkout anemometr-most
-sudo ./system/install.sh
+journalctl -u retencka -b | grep vitr-most
 ```
 
-Verze retenčky zůstává stejná, takže noční automatická aktualizace most nepřepíše, dokud
-nevyjde **novější** verze retenčky. **Před dalším vydáním retenčky sloučit větev
-`anemometr-most` do `main`**, jinak se most s novou verzí ztratí. Pro nádrže most nic nemění
-(bez služby vitr cizí pakety jen zahodí). Vypnutí: `RETENCKA_BRIDGE_PORT=0` v `/etc/default/retencka`.
+→ `vitr-most: anemometer frames (0x13-0x16) go to vitr on 127.0.0.1:47613`. Na webu vitru
+Nastavení → Diagnostika → *Rádio (přes retenčku): data chodí* (jakmile vysílá aspoň jeden
+anemometr).
+
+Odebrání mostu (retenčka bude přesně jako předtím): `sudo bash system/odinstalovat-most.sh`.
 
 ## 2. Služba vitr
 

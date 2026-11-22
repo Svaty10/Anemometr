@@ -41,12 +41,26 @@ systemctl restart vitr
 sleep 3
 systemctl is-active --quiet vitr && echo "vitr běží." || { echo "vitr neběží:"; journalctl -u vitr -n 30 --no-pager; exit 1; }
 
-step "Kontrola rádia retenčky"
-if [ -f /var/lib/retencka/app/current/server/retencka/bridge.py ]; then
-    echo "Retenčka má most pro anemometry – pakety se budou předávat sem."
+step "Most k rádiu retenčky"
+# Retenčka se nemění: jen doplněk služby (drop-in), který při jejím startu připojí most
+# pro anemometry. Přežije aktualizace retenčky; odinstalace: sudo bash system/odinstalovat-most.sh
+if systemctl cat retencka.service >/dev/null 2>&1; then
+    install -d -m 755 /usr/local/lib/vitr-most
+    install -m 644 "$SRC/system/retencka-most/vitr_most.py" "$SRC/system/retencka-most/sitecustomize.py" /usr/local/lib/vitr-most/
+    install -d -m 755 /etc/systemd/system/retencka.service.d
+    install -m 644 "$SRC/system/retencka-most/vitr-most.conf" /etc/systemd/system/retencka.service.d/vitr-most.conf
+    systemctl daemon-reload
+    SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+    systemctl restart retencka
+    sleep 8
+    if journalctl -u retencka --since "$SINCE" --no-pager 2>/dev/null | grep -q "vitr-most: anemometer frames"; then
+        echo "Most běží: pakety anemometrů z rádia retenčky jdou do vitru."
+    else
+        echo -e "\033[1;33mPOZOR:\033[0m most se v retenčce nepřipojil. Zkontrolujte:"
+        echo "  journalctl -u retencka --since \"$SINCE\" | grep vitr-most"
+    fi
 else
-    echo -e "\033[1;33mPOZOR:\033[0m nainstalovaná retenčka ještě nemá most pro anemometry (bridge.py)."
-    echo "Nainstalujte retenčku z větve anemometr-most (viz docs/instalace.md), jinak sem žádná data nepřijdou."
+    echo -e "\033[1;33mPOZOR:\033[0m retenčka (retencka.service) tu není nainstalovaná – anemometry nemají rádio."
 fi
 
 PORT=$(sed -n 's/^VITR_WEB_PORT=\([0-9]*\)/\1/p' /etc/default/vitr); PORT=${PORT:-8080}

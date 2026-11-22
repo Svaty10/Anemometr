@@ -1,6 +1,6 @@
 """Anemometer hub logic: radio frames from the tank hub's bridge, pairing, data.
 
-Frames arrive over UDP from the tank hub (retencka/bridge.py), which owns the
+Frames arrive over UDP from the tank hub (bridge attached to it by system/retencka-most), which owns the
 CC1101. A PAIR_REQ is answered in the same datagram exchange (the node listens only
 ~0.6 s): PAIR_ACK while the user opened the pairing window, UNPAIR when the user
 asked to unpair a sensor. New keys become valid only after the node proves them
