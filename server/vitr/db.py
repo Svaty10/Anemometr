@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS settings (
 class Database:
     def __init__(self, path: str):
         self.lock = threading.RLock()
+        self.path = path
         self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")

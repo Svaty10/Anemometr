@@ -56,7 +56,7 @@ def first_start(db: Database, data_dir: Path) -> None:
     if not db.get("uid"):
         db.set("uid", secrets.token_hex(3))
     if not db.get("password"):
-        pw = "-".join(secrets.token_hex(2) for _ in range(3))
+        pw = "-".join(secrets.token_hex(2) for _ in range(5))      # 80 bits
         db.set("password", hash_password(pw))
         f = data_dir / "heslo.txt"
         f.write_text(f"Heslo pro nastavení webu anemometru: {pw}\n", encoding="utf-8")

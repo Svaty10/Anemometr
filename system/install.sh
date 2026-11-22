@@ -53,5 +53,5 @@ PORT=$(sed -n 's/^VITR_WEB_PORT=\([0-9]*\)/\1/p' /etc/default/vitr); PORT=${PORT
 echo
 echo "Web: http://$(hostname).local:$PORT"
 if [ -f /var/lib/vitr/heslo.txt ]; then
-    echo "$(cat /var/lib/vitr/heslo.txt)   (soubor /var/lib/vitr/heslo.txt – po změně hesla ho smažte)"
+    echo "$(cat /var/lib/vitr/heslo.txt)   (po změně hesla na webu se soubor smaže sám)"
 fi

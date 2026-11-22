@@ -37,7 +37,7 @@
         }
         const r = await fetch(path, opt);
         const j = await r.json().catch(() => ({}));
-        if (r.status === 401) { setAdmin(false); }
+        if (r.status === 401) { window.location.replace('/login'); throw new Error('Přihlaste se'); }
         if (!r.ok) throw new Error(j.error || r.statusText);
         return j;
     }
@@ -370,10 +370,7 @@
     // ----------------------------------------------------------- nastavení
     function setAdmin(v) {
         ADMIN = v;
-        $('loginCard').classList.toggle('hidden', v);
         $('setLayout').classList.toggle('hidden', !v);
-        $('loginMenuBtn').classList.toggle('hidden', v);
-        $('logoutBtn').classList.toggle('hidden', !v);
         $('avatarInitial').textContent = $('menuInitial').textContent = v ? 'S' : '?';
         $('userBadge').textContent = v ? 'Správce' : 'Host';
         $('userRole').textContent = v ? 'může měnit nastavení' : 'jen prohlížení';
@@ -570,16 +567,10 @@
         if (!menu.contains(e.target)) { menu.classList.add('hidden'); $('accountBtn').setAttribute('aria-expanded', 'false'); }
     });
     document.querySelectorAll('#themeSeg button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.themePick)));
-    $('loginMenuBtn').addEventListener('click', () => { menu.classList.add('hidden'); showTab('nastaveni'); $('loginPw').focus(); });
-    $('logoutBtn').addEventListener('click', async () => { menu.classList.add('hidden'); await api('/api/logout', {}).catch(() => {}); setAdmin(false); toast('Odhlášeno'); });
-    $('loginForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        try {
-            await api('/api/login', { password: $('loginPw').value });
-            $('loginPw').value = '';
-            setAdmin(true);
-            toast('Přihlášeno');
-        } catch (err) { toast(err.message, true); }
+    $('logoutBtn').addEventListener('click', async () => {
+        menu.classList.add('hidden');
+        await api('/api/logout', {}).catch(() => {});
+        window.location.replace('/login');
     });
     $('pairBtn').addEventListener('click', async () => {
         try { await api(STATE.pairing_left ? '/api/pair/stop' : '/api/pair/start', {}); await refresh(); } catch (err) { toast(err.message, true); }
@@ -599,7 +590,7 @@
         try {
             await api('/api/password', { old: $('pwOld').value, new: $('pwNew').value });
             e.target.reset();
-            toast('Heslo změněno');
+            toast('Heslo změněno – ostatní zařízení se musí přihlásit znovu');
         } catch (err) { toast(err.message, true); }
     });
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readTheme(); reloadCharts(); });
@@ -619,8 +610,9 @@
     readTheme();
     document.querySelectorAll('.range-picker').forEach(buildRangePicker);
     (async () => {
-        const me = await api('/api/me').catch(() => ({}));
-        setAdmin(me.admin === true);
+        const me = await api('/api/me').catch(() => null);
+        if (!me) return;
+        setAdmin(true);
         await refresh();
         setInterval(refresh, 15000);
         setInterval(reloadCharts, 120000);
