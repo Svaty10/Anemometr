@@ -208,7 +208,7 @@
             ink: cssVar('--ink'), ink2: cssVar('--ink-2'), muted: cssVar('--muted'), grid: cssVar('--grid'),
             surface: cssVar('--surface'), lineStrong: cssVar('--line-strong'),
             s1: cssVar('--series-1'), s2: cssVar('--series-2'), s3: cssVar('--series-3'),
-            s4: cssVar('--series-4'), s5: cssVar('--series-5'), s6: cssVar('--series-6')
+            s4: cssVar('--series-4'), s5: cssVar('--series-5'), s6: cssVar('--series-6'), amber: cssVar('--amber')
         });
         if (typeof Chart === 'undefined') return;
         const d = Chart.defaults;
@@ -256,6 +256,9 @@
     }
 
     // ------------------------------------------------------------------ grafy
+    // Stejně jako retenčka (1.23+): uprostřed grafu pevná svislá čára, tažením se data posouvají
+    // pod ní, bublina nad grafem ukazuje hodnoty pod čarou; graf se otevře s posledním měřením
+    // pod čarou. Starší data se dotahují po oknech délky zvoleného rozsahu.
     const PRESETS = [['24h', '24 h', 86400], ['7d', '7 dní', 7 * 86400], ['30d', '30 dní', 30 * 86400], ['1y', 'rok', 365 * 86400]];
     const ranges = {};
     const charts = {};
@@ -279,47 +282,273 @@
                 seg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
                 ranges[key] = v;
                 try { localStorage.setItem('range:' + key, v); } catch (e) { /* ignore */ }
+                resetScrub(key);
                 reloadChart(key);
             });
             seg.appendChild(b);
         });
         el.appendChild(seg);
     }
-    function span(key) { const p = PRESETS.find((x) => x[0] === ranges[key]); return p ? p[2] : 86400; }
+    function rangeOf(key) {
+        const p = PRESETS.find((x) => x[0] === ranges[key]);
+        const to = Math.floor(Date.now() / 1000);
+        return { from: to - (p ? p[2] : 86400), to, live: true };
+    }
 
-    function timeTicks(min, max, count) {
-        const steps = [3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400, 61 * 86400];
-        const range = (max - min) / 1000;
-        const step = steps.find((s) => range / s <= count) || steps[steps.length - 1];
-        const off = new Date().getTimezoneOffset() * 60;
-        const out = [];
-        let t = Math.ceil((min / 1000 - off) / step) * step + off;
-        for (; t * 1000 <= max; t += step) out.push({ value: t * 1000, day: step >= 86400 });
+    const p2 = (n) => String(n).padStart(2, '0');
+    const fmtStamp = (ms) => { const d = new Date(ms); return `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}`; };
+
+    // historie z hubu (čas v ms); uzavřená okna se drží déle v mezipaměti
+    const histCache = new Map();
+    async function getHistory(r, node) {
+        const k = node + '|' + r.from + '|' + r.to;
+        const hit = histCache.get(k);
+        const past = r.to * 1000 < Date.now() - 3600e3;
+        if (hit && Date.now() - hit.at < (past ? 600e3 : 60e3)) return hit.data;
+        const data = await api(`/api/history?id=${node}&from=${r.from}&to=${r.to}`);
+        data.t = (data.t || []).map((x) => x * 1000);
+        histCache.delete(k);
+        histCache.set(k, { at: Date.now(), data, to: r.to });
+        if (histCache.size > 120) histCache.delete(histCache.keys().next().value);
+        return data;
+    }
+    function dropLiveHistory() {
+        const edge = Date.now() / 1000 - 3600;
+        histCache.forEach((v, k) => { if (!v.to || v.to >= edge) histCache.delete(k); });
+    }
+
+    const SCRUB = {};      // key -> { offset (s, + = do minulosti), chunks, exhausted, first, last (ms), loading }
+    const SCRUB_RANGE = {};
+    function scrubState(key) { return SCRUB[key] || (SCRUB[key] = { offset: null, home: true, chunks: 1, exhausted: false, first: null, last: null, loading: false }); }
+    function homeOffset(key, r) {
+        if (!r || !r.live) return 0;
+        const span = r.to - r.from, s = SCRUB[key];
+        if (!s || s.last == null) return -span / 2;
+        return Math.max(-span / 2, Math.min(s.chunks * span, r.from + span / 2 - s.last / 1000));
+    }
+    function resetScrub(key) { delete SCRUB[key]; }
+    function viewRange(key, r) {
+        const s = scrubState(key);
+        if (s.offset == null || s.home) s.offset = homeOffset(key, r);
+        return { from: r.from - s.offset, to: r.to - s.offset };
+    }
+    function mergeHist(a, b) {
+        const at = a.t || [], bt = b.t || [];
+        const n = at.length;
+        const isSeries = (k) => Array.isArray(a[k]) && a[k].length === n && Array.isArray(b[k]) && b[k].length === bt.length;
+        const firstB = bt.find((x) => x != null);
+        let keep = n;
+        if (firstB != null) while (keep > 0 && (at[keep - 1] == null || at[keep - 1] >= firstB)) keep--;
+        const lastA = keep ? at[keep - 1] : null;
+        const bucket = (b.bucket_s || a.bucket_s || 300) * 1000;
+        const gap = lastA != null && firstB != null && firstB - lastA > 3 * bucket + 600e3;
+        const out = Object.assign({}, b);
+        Object.keys(b).forEach((k) => {
+            if (!Array.isArray(a[k]) || !Array.isArray(b[k])) return;
+            if (k === 't' || isSeries(k)) {
+                const head = a[k].slice(0, keep);
+                if (gap) head.push(k === 't' ? lastA + bucket : null);   // přerušení čáry na švu oken
+                out[k] = head.concat(b[k]);
+            } else out[k] = a[k].concat(b[k]);                           // seznamy událostí (boots)
+        });
         return out;
     }
-    function timeScale(frm, to) {
-        let unit = new Map();
+    async function histChunks(key, r, node, single) {
+        const s = scrubState(key), span = r.to - r.from;
+        const anchor = r.live ? Math.floor(r.from / 3600) * 3600 : r.from;
+        const wins = [];
+        for (let i = s.chunks; i >= 1; i--) wins.push({ from: anchor - i * span, to: anchor - (i - 1) * span });
+        wins.push({ from: anchor, to: r.to });
+        const parts = await Promise.all(wins.map((w) => getHistory(w, node)));
+        const d = parts.reduce(mergeHist);
+        d.loadedFrom = (anchor - s.chunks * span) * 1000;
+        d.first_ts = parts[parts.length - 1].first_ts;
+        if (single) setScrubStart(key, [d]);
+        return d;
+    }
+    function setScrubStart(key, list) {
+        const s = scrubState(key);
+        const firsts = list.map((d) => d.first_ts).filter((x) => x != null);
+        s.first = firsts.length ? Math.min(...firsts) : null;
+        s.exhausted = s.first == null || list.every((d) => d.loadedFrom <= s.first);
+        const lasts = list.map((d) => { const t = d.t || []; let i = t.length - 1; while (i >= 0 && t[i] == null) i--; return i < 0 ? null : t[i]; })
+            .filter((x) => x != null);
+        s.last = lasts.length ? Math.max(...lasts) : null;
+    }
+    function nearestIdx(t, ms, maxGap, values) {
+        let lo = 0, hi = (t || []).length - 1, best = -1, bestD = Infinity;
+        if (hi < 0) return -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (t[mid] < ms) lo = mid + 1; else hi = mid - 1;
+        }
+        [lo - 1, lo, lo - 2, lo + 1].forEach((i) => {
+            if (i < 0 || i >= t.length || (values && values[i] == null)) return;
+            const dd = Math.abs(t[i] - ms);
+            if (dd < bestD) { bestD = dd; best = i; }
+        });
+        return bestD <= maxGap ? best : -1;
+    }
+    const scrubPlugin = {
+        id: 'scrub',
+        afterDatasetsDraw(chart, args, opts) {
+            const { top, bottom, left, right } = chart.chartArea;
+            const cx = Math.round((left + right) / 2) + 0.5;
+            const ms = chart.scales.x.getValueForPixel(cx);
+            const ctx = chart.ctx;
+            ctx.save();
+            ctx.strokeStyle = T.ink;
+            ctx.globalAlpha = 0.55;
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(cx, top); ctx.lineTo(cx, bottom); ctx.stroke();
+            ctx.globalAlpha = 1;
+            chart.data.datasets.forEach((ds, di) => {
+                if (!chart.isDatasetVisible(di)) return;
+                const pts = ds.data || [];
+                const i = nearestIdx(pts.map((p) => p.x), ms, opts.gapMs || 900e3, pts.map((p) => p.y));
+                if (i < 0) return;
+                const y = chart.scales[ds.yAxisID || 'y'].getPixelForValue(pts[i].y);
+                ctx.beginPath(); ctx.arc(cx, y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = ds.borderColor; ctx.strokeStyle = T.surface; ctx.lineWidth = 2;
+                ctx.fill(); ctx.stroke();
+            });
+            ctx.restore();
+            const box = chart.canvas.parentNode;
+            let bub = box.previousElementSibling;
+            if (!bub || !bub.classList.contains('scrub-bubble')) {
+                bub = document.createElement('div');
+                bub.className = 'scrub-bubble';
+                box.parentNode.insertBefore(bub, box);
+            }
+            const lines = opts.text ? opts.text(ms) : [];
+            const key = opts.key;
+            const away = key && SCRUB_RANGE[key] && !scrubState(key).home;
+            bub.innerHTML = `<b>${esc(fmtStamp(ms))}</b>` +
+                (lines.length ? lines.map((l) => `<span>${esc(l)}</span>`).join('') : '<span class="muted">bez dat</span>') +
+                (away ? '<button type="button" class="scrub-now">Aktuální →</button>' : '');
+            const now = bub.querySelector('.scrub-now');
+            if (now) now.addEventListener('click', () => scrubTo(key, homeOffset(key, SCRUB_RANGE[key])));
+        }
+    };
+    function scrubOpts(key, r, d, text) {
+        SCRUB_RANGE[key] = r;
+        return { key, gapMs: Math.max(d.bucket_s || 300, 300) * 1500, text };
+    }
+    function scrubLimits(key) {
+        const r = SCRUB_RANGE[key], s = scrubState(key), span = r.to - r.from;
+        const min = r.live ? -span / 2 : 0;
+        let max = s.chunks * span;
+        if (s.first != null) max = Math.min(max, Math.max(0, r.from + span / 2 - s.first / 1000));
+        else if (s.exhausted) max = 0;
+        return { min, max: Math.max(min, max), span };
+    }
+    function scrubTo(key, offset) {
+        const ch = charts[key], r = SCRUB_RANGE[key];
+        if (!ch || !r) return;
+        const s = scrubState(key), lim = scrubLimits(key);
+        s.offset = Math.max(lim.min, Math.min(lim.max, offset));
+        s.home = Math.abs(s.offset - homeOffset(key, r)) < 1;
+        const v = viewRange(key, r);
+        ch.options.scales.x.min = v.from * 1000;
+        ch.options.scales.x.max = v.to * 1000;
+        ch.update('none');
+        if (!s.exhausted && !s.loading && s.offset > s.chunks * lim.span - lim.span / 2) {
+            s.loading = true;
+            s.chunks += 1;
+            Promise.resolve(LOADERS[key]()).catch((e) => console.error(key, e)).finally(() => { s.loading = false; });
+        }
+    }
+    function scrubbable(key, canvasId) {
+        const canvas = $(canvasId), box = canvas.parentNode;
+        box.classList.add('scrub');
+        canvas.tabIndex = 0;
+        canvas.setAttribute('aria-label', 'Graf – šipkami vlevo a vpravo posunete čas, Home = aktuální data');
+        let drag = null;
+        box.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0 || e.target.closest('button') || !charts[key] || !SCRUB_RANGE[key]) return;
+            const a = charts[key].chartArea;
+            drag = { id: e.pointerId, x: e.clientX, start: scrubState(key).offset, w: Math.max(1, a.right - a.left) };
+            try { box.setPointerCapture(e.pointerId); } catch (err) { /* syntetická událost */ }
+            box.classList.add('dragging');
+        });
+        box.addEventListener('pointermove', (e) => {
+            if (!drag || e.pointerId !== drag.id) return;
+            const span = SCRUB_RANGE[key].to - SCRUB_RANGE[key].from;
+            scrubTo(key, drag.start + (e.clientX - drag.x) / drag.w * span);
+        });
+        const up = (e) => {
+            if (!drag || e.pointerId !== drag.id) return;
+            drag = null;
+            box.classList.remove('dragging');
+        };
+        box.addEventListener('pointerup', up);
+        box.addEventListener('pointercancel', up);
+        box.addEventListener('dblclick', () => scrubTo(key, homeOffset(key, SCRUB_RANGE[key])));
+        canvas.addEventListener('keydown', (e) => {
+            const r = SCRUB_RANGE[key];
+            if (!r) return;
+            const step = (r.to - r.from) / 10, o = scrubState(key).offset;
+            if (e.key === 'ArrowLeft') scrubTo(key, o + step);
+            else if (e.key === 'ArrowRight') scrubTo(key, o - step);
+            else if (e.key === 'Home') scrubTo(key, homeOffset(key, r));
+            else return;
+            e.preventDefault();
+        });
+    }
+
+    // dílky časové osy na celé hodiny / půlnoc / začátek měsíce (místní čas)
+    const MONTHS = ['led', 'úno', 'bře', 'dub', 'kvě', 'čvn', 'čvc', 'srp', 'zář', 'říj', 'lis', 'pro'];
+    function timeTicks(fromMs, toMs, maxN) {
+        const H = 3600e3, D = 86400e3, span = toMs - fromMs, out = [];
+        const hours = [1, 2, 3, 6, 12].find((h) => span / (h * H) <= maxN);
+        const days = [1, 2, 3, 7, 14].find((n) => span / (n * D) <= maxN);
+        if (hours) {
+            const d = new Date(fromMs);
+            d.setMinutes(0, 0, 0);
+            while (d.getTime() < fromMs || d.getHours() % hours) d.setHours(d.getHours() + 1);
+            for (; d.getTime() <= toMs; d.setHours(d.getHours() + hours)) out.push({ value: d.getTime(), unit: 'h' });
+        } else if (days) {
+            const d = new Date(fromMs);
+            d.setHours(0, 0, 0, 0);
+            if (d.getTime() < fromMs) d.setDate(d.getDate() + 1);
+            for (; d.getTime() <= toMs; d.setDate(d.getDate() + days)) out.push({ value: d.getTime(), unit: 'd' });
+        } else {
+            const months = [1, 2, 3, 6, 12].find((m) => span / (m * 30.4 * D) <= maxN) || 12;
+            const d = new Date(fromMs);
+            d.setHours(0, 0, 0, 0);
+            d.setDate(1);
+            if (d.getTime() < fromMs) d.setMonth(d.getMonth() + 1);
+            while (d.getMonth() % months) d.setMonth(d.getMonth() + 1);
+            for (; d.getTime() <= toMs; d.setMonth(d.getMonth() + months)) out.push({ value: d.getTime(), unit: 'm' });
+        }
+        return out;
+    }
+    function tickLabel(v, unit) {
+        const d = new Date(v);
+        if (unit === 'm') return d.getMonth() === 0 ? `${MONTHS[0]} ${d.getFullYear()}` : MONTHS[d.getMonth()];
+        if (unit === 'h' && (d.getHours() || d.getMinutes())) return `${d.getHours()}:${p2(d.getMinutes())}`;
+        return `${d.getDate()}. ${d.getMonth() + 1}.`;
+    }
+    function timeScale(r) {
+        let unitOf = new Map();
         return {
-            type: 'linear', min: frm * 1000, max: to * 1000,
+            type: 'linear', min: r.from * 1000, max: r.to * 1000,
             afterBuildTicks: (axis) => {
                 const ticks = timeTicks(axis.min, axis.max, window.innerWidth < 640 ? 4 : 8);
-                unit = new Map(ticks.map((t) => [t.value, t.day]));
+                unitOf = new Map(ticks.map((t) => [t.value, t.unit]));
                 axis.ticks = ticks.map((t) => ({ value: t.value }));
             },
-            ticks: {
-                autoSkip: true, maxRotation: 0,
-                callback: (v) => {
-                    const d = new Date(v);
-                    if (unit.get(v)) return `${d.getDate()}. ${d.getMonth() + 1}.`;
-                    return d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' });
-                }
-            }
+            ticks: { autoSkip: true, maxRotation: 0, callback: (v) => tickLabel(v, unitOf.get(v)) }
         };
     }
-    const series = (t, vals) => t.map((x, i) => ({ x: x * 1000, y: vals[i] }));
+    function series(t, values) {
+        const out = new Array(t.length);
+        for (let i = 0; i < t.length; i++) out[i] = { x: t[i], y: values[i] };
+        return out;
+    }
     function lastDot(values, color) {
         let last = -1;
-        for (let i = values.length - 1; i >= 0; i--) { if (values[i] != null) { last = i; break; } }
+        for (let i = (values || []).length - 1; i >= 0; i--) { if (values[i] != null) { last = i; break; } }
         return {
             pointRadius: (c) => (c.dataIndex === last ? 4 : 0),
             pointBorderWidth: (c) => (c.dataIndex === last ? 2 : 1),
@@ -328,76 +557,144 @@
         };
     }
     const line = (color, extra) => Object.assign({ borderColor: color, backgroundColor: color, pointBackgroundColor: color, pointBorderColor: color }, extra || {});
+    function alpha(color, a) {
+        const m = /^#([0-9a-f]{6})$/i.exec(color);
+        if (!m) return color;
+        const n = parseInt(m[1], 16);
+        return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+    }
     function upsert(key, canvas, config) {
         if (charts[key]) charts[key].destroy();
         charts[key] = new Chart($(canvas).getContext('2d'), config);
     }
-    const tip = (unit, d = 1) => ({
-        callbacks: {
-            title: (ctx) => (ctx.length ? fmtDateTime(ctx[0].parsed.x) : ''),
-            label: (c) => `${c.dataset.label}: ${num(c.parsed.y, d, ' ' + unit)}`
+    // vložení baterie (plný kroužek) a restart čidla (prázdný) – svislá čárka v grafu baterie
+    const bootMarks = {
+        id: 'bootMarks',
+        afterDatasetsDraw(chart, args, opts) {
+            const ev = opts.boots || [];
+            if (!ev.length) return;
+            const x = chart.scales.x, { top, bottom, left, right } = chart.chartArea;
+            const ctx = chart.ctx;
+            ctx.save();
+            ctx.lineWidth = 1;
+            ev.forEach((e) => {
+                const px = Math.round(x.getPixelForValue(e.t)) + 0.5;
+                if (px < left || px > right) return;
+                ctx.strokeStyle = alpha(T.amber, 0.35);
+                ctx.beginPath(); ctx.moveTo(px, top + 8); ctx.lineTo(px, bottom); ctx.stroke();
+                ctx.beginPath(); ctx.arc(px, top + 4, 3.5, 0, Math.PI * 2);
+                ctx.strokeStyle = T.amber;
+                ctx.fillStyle = e.wdt ? T.surface : T.amber;
+                ctx.fill(); ctx.stroke();
+            });
+            ctx.restore();
         }
-    });
-    const toMs = (h) => Object.assign(h, {
-        speed: h.speed.map((v) => (v == null ? null : Math.round(v / 3.6 * 10) / 10)),
-        gust: h.gust.map((v) => (v == null ? null : Math.round(v / 3.6 * 10) / 10))
-    });
-    const history = (id, frm, to) => api(`/api/history?id=${id}&from=${frm}&to=${to}`);
+    };
+    // popisek osy česky a bez binárního šumu
+    const axisNum = (v, unit) => num(v, Math.abs(v - Math.round(v)) < 1e-6 ? 0 : 1, unit);
+    const pctAxis = () => ({ min: 0, max: 100, ticks: { callback: (v) => axisNum(v, ' %'), maxTicksLimit: 6 } });
+    const msAxis = () => ({ beginAtZero: true, ticks: { callback: (v) => axisNum(v, ' m/s'), maxTicksLimit: 6 } });
+    const baseOpts = () => ({ responsive: true, maintainAspectRatio: false, parsing: false, interaction: { mode: 'nearest', axis: 'x', intersect: false } });
+    const toMs = (v) => (v == null ? null : Math.round(v / 3.6 * 10) / 10);
+    const gapOf = (d) => Math.max(d.bucket_s || 300, 300) * 1500;
 
-    async function reloadChart(key) {
-        if (typeof Chart === 'undefined' || !STATE || !STATE.nodes.length) return;
-        const to = Math.floor(Date.now() / 1000);
-        const frm = to - span(key);
-        try {
-            if (key === 'wind' && CURRENT != null && !VIEW_ALL) {
-                const h = toMs(await history(CURRENT, frm, to));
-                upsert('wind', 'windChart', {
-                    type: 'line',
-                    data: { datasets: [
-                        line(T.s1, { label: h.bucket ? 'Průměrná rychlost' : 'Rychlost', data: series(h.t, h.speed), fill: { target: 'origin', above: T.s1 + '22' }, ...lastDot(h.speed, T.s1) }),
-                        line(T.s2, { label: h.bucket ? 'Nejsilnější náraz' : 'Náraz', data: series(h.t, h.gust), borderWidth: 1.5 })
-                    ] },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, parsing: false, interaction: { mode: 'index', intersect: false },
-                        plugins: { tooltip: tip('m/s') },
-                        scales: { x: timeScale(frm, to), y: { beginAtZero: true, ticks: { callback: (v) => v + ' m/s' } } }
-                    }
-                });
-            } else if (key === 'battery' && CURRENT != null && !VIEW_ALL) {
-                const h = await history(CURRENT, frm, to);
-                upsert('battery', 'batteryChart', {
-                    type: 'line',
-                    data: { datasets: [
-                        line(T.s3, { label: 'Baterie', data: series(h.t, h.battery), spanGaps: true, yAxisID: 'y' }),
-                        line(T.s4, { label: 'Signál', data: series(h.t, h.rssi), borderWidth: 1.5, yAxisID: 'y1' })
-                    ] },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, parsing: false, interaction: { mode: 'index', intersect: false },
-                        plugins: { tooltip: { callbacks: { title: (c) => (c.length ? fmtDateTime(c[0].parsed.x) : ''),
-                            label: (c) => c.dataset.yAxisID === 'y' ? `Baterie: ${num(c.parsed.y, 2, ' V')}` : `Signál: ${num(c.parsed.y, 0, ' dBm')}` } } },
-                        scales: {
-                            x: timeScale(frm, to),
-                            y: { position: 'left', ticks: { callback: (v) => num(v, 2, ' V') } },
-                            y1: { position: 'right', grid: { display: false }, ticks: { callback: (v) => v + ' dBm' } }
-                        }
-                    }
-                });
-            } else if (key === 'all' && VIEW_ALL) {
-                const colors = [T.s1, T.s2, T.s3, T.s4, T.s5, T.s6];
-                const hs = (await Promise.all(STATE.nodes.map((n) => history(n.id, frm, to)))).map(toMs);
-                upsert('all', 'allChart', {
-                    type: 'line',
-                    data: { datasets: STATE.nodes.map((n, i) => line(colors[i % 6], { label: n.name, data: series(hs[i].t, hs[i].speed), ...lastDot(hs[i].speed, colors[i % 6]) })) },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, parsing: false, interaction: { mode: 'index', intersect: false },
-                        plugins: { tooltip: tip('m/s') },
-                        scales: { x: timeScale(frm, to), y: { beginAtZero: true, ticks: { callback: (v) => v + ' m/s' } } }
-                    }
-                });
-            }
-        } catch (e) { /* hub se restartuje – příště */ }
+    async function loadWindChart() {
+        if (CURRENT == null || VIEW_ALL) return;
+        const r = rangeOf('wind');
+        const d = await histChunks('wind', r, CURRENT, true);
+        const sp = d.speed.map(toMs), gu = d.gust.map(toMs), gap = gapOf(d);
+        upsert('wind', 'windChart', {
+            type: 'line',
+            plugins: [scrubPlugin],
+            data: { datasets: [
+                line(T.s1, Object.assign({ label: d.bucket ? 'Průměrná rychlost' : 'Rychlost', data: series(d.t, sp), backgroundColor: alpha(T.s1, 0.05), fill: 'origin', borderWidth: 2.5, spanGaps: false }, lastDot(sp, T.s1))),
+                line(T.s2, { label: d.bucket ? 'Nejsilnější náraz' : 'Náraz', data: series(d.t, gu), borderWidth: 1.5, spanGaps: false })
+            ] },
+            options: Object.assign(baseOpts(), {
+                plugins: {
+                    tooltip: { enabled: false },
+                    scrub: scrubOpts('wind', r, d, (ms) => {
+                        const out = [];
+                        const i = nearestIdx(d.t, ms, gap, sp);
+                        if (i >= 0) out.push(`${d.bucket ? 'Průměr' : 'Rychlost'} ${num(sp[i], 1, ' m/s')} · ${kmh(d.speed[i])}`);
+                        const j = nearestIdx(d.t, ms, gap, gu);
+                        if (j >= 0) out.push(`Náraz ${num(gu[j], 1, ' m/s')}`);
+                        return out;
+                    })
+                },
+                scales: { x: timeScale(viewRange('wind', r)), y: msAxis() }
+            })
+        });
     }
-    function reloadCharts() {
+
+    async function loadBatteryChart() {
+        if (CURRENT == null || VIEW_ALL) return;
+        const r = rangeOf('battery');
+        const d = await histChunks('battery', r, CURRENT, true);
+        const gap = gapOf(d);
+        upsert('battery', 'batteryChart', {
+            type: 'line',
+            plugins: [bootMarks, scrubPlugin],
+            data: { datasets: [
+                line(T.s3, { label: 'Baterie (%)', data: series(d.t, d.bat_pct || []), spanGaps: true, yAxisID: 'y' }),
+                line(T.s4, { label: 'Signál (%)', data: series(d.t, (d.rssi || []).map(sigPct)), borderWidth: 1.5, yAxisID: 'y' })
+            ] },
+            options: Object.assign(baseOpts(), {
+                plugins: {
+                    bootMarks: { boots: d.boots },
+                    tooltip: { enabled: false },
+                    scrub: scrubOpts('battery', r, d, (ms) => {
+                        const out = [];
+                        const i = nearestIdx(d.t, ms, gap, d.bat_pct || []);
+                        if (i >= 0) out.push(`Baterie ${num(d.bat_pct[i], 0, ' %')} · ${num(d.vbat[i], 3, ' V')}`);
+                        const j = nearestIdx(d.t, ms, gap, d.rssi || []);
+                        if (j >= 0) out.push('Signál ' + sigTxt(d.rssi[j]));
+                        const half = Math.max(d.bucket_s || 300, 900) * 1000;
+                        return out.concat((d.boots || []).filter((b) => Math.abs(b.t - ms) <= half)
+                            .map((b) => (b.wdt ? 'Restart čidla' : 'Vložení baterie')));
+                    })
+                },
+                scales: { x: timeScale(viewRange('battery', r)), y: pctAxis() }
+            })
+        });
+    }
+
+    async function loadAllChart() {
+        if (!VIEW_ALL || !STATE) return;
+        const r = rangeOf('all');
+        const res = (await Promise.all(STATE.nodes.map((n) =>
+            histChunks('all', r, n.id).then((d) => ({ n, d, sp: d.speed.map(toMs) })).catch(() => null)))).filter(Boolean);
+        setScrubStart('all', res.map(({ d }) => d));
+        const pal = [T.s1, T.s2, T.s3, T.s4, T.s5, T.s6];
+        const d0 = res.length ? res[0].d : {};
+        const gap = gapOf(d0);
+        upsert('all', 'allChart', {
+            type: 'line',
+            plugins: [scrubPlugin],
+            data: { datasets: res.map(({ n, d, sp }, i) => line(pal[i % pal.length], { label: n.name, data: series(d.t, sp), spanGaps: false, ...lastDot(sp, pal[i % pal.length]) })) },
+            options: Object.assign(baseOpts(), {
+                plugins: {
+                    tooltip: { enabled: false },
+                    scrub: scrubOpts('all', r, d0, (ms) => res.map(({ n, d, sp }) => {
+                        const i = nearestIdx(d.t, ms, gap, sp);
+                        return i < 0 ? null : `${n.name}: ${num(sp[i], 1, ' m/s')}`;
+                    }).filter(Boolean))
+                },
+                scales: { x: timeScale(viewRange('all', r)), y: msAxis() }
+            })
+        });
+    }
+
+    const LOADERS = { wind: loadWindChart, battery: loadBatteryChart, all: loadAllChart };
+    scrubbable('wind', 'windChart');
+    scrubbable('battery', 'batteryChart');
+    scrubbable('all', 'allChart');
+    function reloadChart(key) {
+        if (typeof Chart === 'undefined' || !STATE || !STATE.nodes.length) return;
+        if (LOADERS[key]) LOADERS[key]().catch(() => { /* hub se restartuje – příště */ });
+    }
+    function reloadCharts(live) {
+        if (live) dropLiveHistory();
         if (VIEW_ALL) reloadChart('all');
         else { reloadChart('wind'); reloadChart('battery'); }
     }
@@ -427,12 +724,12 @@
             $('txtBft').textContent = b + ' Bft';
             $('txtBftSub').textContent = n.stuck && !sp ? name + ' · kontakt sepnutý, rotor stojí' : name;
         }
-        const q = n.link_pct == null ? null : (n.link_pct >= 60 ? 'výborný' : n.link_pct >= 35 ? 'dobrý' : n.link_pct >= 15 ? 'slabý' : 'velmi slabý');
-        $('txtRssi').textContent = n.rssi == null ? '–' : `${q} · ${n.link_pct} %`;
-        $('txtLoss').textContent = n.rssi == null ? '–' : `${num(n.rssi, 0)} dBm` + (n.loss_pct == null ? '' : ` · ztráty 24 h ${num(n.loss_pct, 1, ' %')}`);
+        // jako retenčka: „dobrý · 57 % (−76 dBm)“, baterie v % podle typu a korekce, napětí na mV
+        $('txtRssi').textContent = sigTxt(n.rssi);
+        $('txtLoss').textContent = n.loss_pct == null ? '' : `ztráty 24 h: ${num(n.loss_pct, 1, ' %')}`;
         $('txtBat').textContent = n.battery_pct == null ? '–' : n.battery_pct + ' %' + (n.battery_low ? ' – vyměnit' : '');
         $('txtBat').classList.toggle('bad-text', !!n.battery_low);
-        $('txtBatV').textContent = n.battery_v == null ? '–' : num(n.battery_v, 2, ' V');
+        $('txtBatV').textContent = n.battery_v == null ? '' : num(n.battery_v, 3, ' V') + ' · ' + (n.battery_type === 'lifes2' ? 'lithiové' : 'alkalické');
     }
 
     function renderOverview() {
@@ -447,7 +744,7 @@
                 <div class="big">${n.speed_kmh == null ? '–' : num(n.speed_kmh / 3.6, 1)} <small>m/s</small></div>
                 <div class="ov-litres">${kmh(n.speed_kmh)} · náraz ${ms(n.gust_kmh)}</div>
                 <div class="meta"><span><span class="dot ${esc(n.status)}"></span><span class="${n.status === 'online' ? '' : n.status === 'stale' ? 'warn' : 'bad'}">${esc(st)}</span>${n.last_seen ? `<span>${esc(fmtAgo(age(n)))}</span>` : ''}</span>
-                <span>${ico('battery')} <span class="${n.battery_low ? 'bad' : ''}">${n.battery_pct == null ? '–' : n.battery_pct + ' %'}</span></span></div></div>`;
+                <span>${ico('antenna')} ${n.link_pct == null ? '–' : n.link_pct + ' %'}</span><span>${ico('battery')} <span class="${n.battery_low ? 'bad' : ''}">${n.battery_pct == null ? '–' : n.battery_pct + ' %'}</span></span></div></div>`;
             c.addEventListener('click', () => selectNode(n.id, false));
             g.appendChild(c);
         });
@@ -486,6 +783,7 @@
         try { sessionStorage.setItem('viewAll', v ? '1' : ''); } catch (e) { /* ignore */ }
     }
     function selectNode(id, keepAll) {
+        if (id !== CURRENT) { resetScrub('wind'); resetScrub('battery'); }
         CURRENT = id;
         try { localStorage.setItem('node', String(id)); } catch (e) { /* ignore */ }
         if (!keepAll) setViewAll(false);
@@ -591,15 +889,48 @@
                         <p class="field-hint">Kolikrát jazýček sepne za jednu otáčku (většinou 1, některé anemometry 2).</p>
                     </div>
                 </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Baterie v čidle (3× AA)</label>
+                        <select name="battery_type" class="unified-select">
+                            <option value="lifes2">Lithiové Li-FeS2 (Energizer Ultimate Lithium)</option>
+                            <option value="alkaline">Alkalické</option>
+                        </select>
+                        <p class="field-hint">Podle typu baterií se z napětí počítá zbývající kapacita. Lithiové drží napětí téměř až do vybití, alkalické klesá postupně.</p>
+                    </div>
+                </div>
                 <div class="inline-actions">
                     <button type="submit" class="btn btn-primary">Uložit</button>
                 </div>
-            </form>`;
+            </form>
+            <div class="sub adv">
+                <h3>Kalibrace měření baterie</h3>
+                <p class="field-hint">Změřte napětí baterií voltmetrem a zadejte ho. Hub z toho spočítá korekci (násobek), aby údaj souhlasil. Korekce 1,0000 = bez úpravy.</p>
+                <div class="inline-actions">
+                    <div class="input-unit">
+                        <input type="text" inputmode="decimal" autocomplete="off" data-bat="actual" placeholder="Změřené napětí" aria-label="Změřené napětí (V)">
+                        <span class="unit">V</span>
+                    </div>
+                    <button class="btn btn-outline" type="button" data-bat="cal">Opravit měření</button>
+                </div>
+                <p class="muted small mt-15">Korekce: <strong data-bat="trim">–</strong> · hlášené napětí <span data-live="vbat">–</span></p>
+            </div>`;
+        const batIn = c.querySelector('[data-bat="actual"]');
+        c.querySelector('[data-bat="trim"]').textContent = num(n.battery_trim, 4);
+        c.querySelector('[data-bat="cal"]').addEventListener('click', async () => {
+            const r = await action(() => api('/api/node/battery', { id: n.id, actual_v: batIn.value }), 'Baterie zkalibrována.');
+            if (r) {
+                c.querySelector('[data-bat="trim"]').textContent = num(r.battery_trim, 4);
+                batIn.value = '';
+                await refresh();
+            }
+        });
         const f = c.querySelector('form');
         f.name.value = n.name;
         f.rev.value = Math.round(n.rev_ms * 1000) / 1000;
         f.unit.value = 'ms';
         f.ppr.value = n.ppr;
+        f.battery_type.value = n.battery_type || 'alkaline';
         f.unit.addEventListener('change', () => {          // přepočet čísla při změně jednotky
             const v = Number(f.rev.value);
             if (v) f.rev.value = Math.round((f.unit.value === 'kmh' ? v * 3.6 : v / 3.6) * 1000) / 1000;
@@ -607,7 +938,7 @@
         f.addEventListener('submit', async (e) => {
             e.preventDefault();
             try {
-                await api('/api/node/update', { id: n.id, name: f.name.value, rev_value: f.rev.value, rev_unit: f.unit.value, ppr: f.ppr.value });
+                await api('/api/node/update', { id: n.id, name: f.name.value, rev_value: f.rev.value, rev_unit: f.unit.value, ppr: f.ppr.value, battery_type: f.battery_type.value });
                 toast('Uloženo');
                 document.activeElement.blur();
                 $('nodeCards').dataset.ids = '';
@@ -625,6 +956,8 @@
         set('hz', n.speed_kmh == null ? '–' : num(n.speed_kmh / 3.6 / n.rev_ms, 2));
         set('clock', (n.clock >= 1 ? '+' : '') + num((n.clock - 1) * 100, 1, ' %'));
         set('fw', n.fw ? num(n.fw / 10, 1) : '–');
+        // hlášené napětí před korekcí (z něj se korekce počítá)
+        set('vbat', n.battery_v == null ? '–' : num(n.battery_v / (n.battery_trim || 1), 3, ' V'));
     }
 
     // ------------------------------------------- čidla: seznam, párování, čidla v dosahu (jako retenčka)
@@ -1503,6 +1836,6 @@
         setInterval(refresh, 15000);
         // čidla a párování: každé 4 s, dokud je otevřené Nastavení (jako u retenčky)
         setInterval(() => { if (ADMIN && $('nastaveni').classList.contains('active') && !document.hidden) refreshNodes(); }, 4000);
-        setInterval(reloadCharts, 120000);
+        setInterval(() => reloadCharts(true), 120000);
     })();
 })();

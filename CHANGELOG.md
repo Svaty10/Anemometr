@@ -3,6 +3,17 @@
 Formát dle [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), verze dle [SemVer](https://semver.org/).
 Postup vydání nové verze: [docs/vydani.md](docs/vydani.md).
 
+## [1.2.0] - 2026-11-22
+
+### Přidáno
+- **Baterie jako u retenčky:** u každého anemometru se volí typ baterie (lithiové Li-FeS2 / alkalické) a procenta se počítají podle vybíjecí křivky daného typu (stejné křivky jako retenčka). V pokročilém nastavení **Kalibrace měření baterie**: zadáte napětí změřené voltmetrem a hub spočítá korekci (násobek, max. ±20 %). Změny se zapisují do Historie událostí.
+- **Grafy jako retenčka 1.25:** uprostřed grafu pevná čára, tažením (nebo šipkami) se posouvá čas, bublina nad grafem ukazuje hodnoty pod čarou a tlačítko *Aktuální →* vrací na poslední měření; starší data se dotahují při posouvání. Popisky osy na celé hodiny / dny / měsíce.
+- Graf **Baterie a signál** v procentech (baterie i signál na jedné ose 0–100 %), se značkami vložení baterie a restartu čidla.
+
+### Změněno
+- Signál všude stejně jako u retenčky: „dobrý · 57 % (−76 dBm)“, 0 % = −110 dBm, 100 % = −50 dBm (dříve −60 dBm); na kartě v přehledu všech anemometrů je i signál.
+- Napětí baterie se ukazuje na tisíciny voltu.
+
 ## [1.1.2] - 2026-11-22
 
 ### Změněno

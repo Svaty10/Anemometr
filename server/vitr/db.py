@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     unpair      INTEGER NOT NULL DEFAULT 0,     -- waiting for the node to confirm unpairing
     paired_at   INTEGER NOT NULL DEFAULT 0,
     position    INTEGER NOT NULL DEFAULT 0,
+    battery_type TEXT NOT NULL DEFAULT 'alkaline',  -- 'lifes2' | 'alkaline': discharge curve
+    battery_trim REAL NOT NULL DEFAULT 1.0,         -- correction of the measured voltage (as in the tank hub)
     fw          INTEGER,
     diag        INTEGER,
     sag         INTEGER
@@ -98,7 +100,9 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(nodes)")}
-        for col, ddl in (("rev_ms", "REAL NOT NULL DEFAULT 0.667"), ("ppr", "INTEGER NOT NULL DEFAULT 1")):
+        for col, ddl in (("rev_ms", "REAL NOT NULL DEFAULT 0.667"), ("ppr", "INTEGER NOT NULL DEFAULT 1"),
+                         ("battery_type", "TEXT NOT NULL DEFAULT 'alkaline'"),
+                         ("battery_trim", "REAL NOT NULL DEFAULT 1.0")):
             if col not in cols:                    # database of an older version
                 self.conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {ddl}")
         self.conn.execute("DELETE FROM settings WHERE key='password'")   # single password of 1.0 (pre-accounts)

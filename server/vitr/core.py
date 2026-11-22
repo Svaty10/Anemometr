@@ -56,11 +56,42 @@ TEMP_INVALID = -128
 U16_INVALID = 0xFFFF
 
 
-def battery_pct(mv: Optional[int]) -> Optional[int]:
-    """Rough charge of 3x AA from the rest voltage (3.0 V cut-off .. 4.6 V fresh)."""
-    if not mv:
+# Battery (3x AA), the same curves as the tank hub (retencka/model.py): cell voltage at a
+# very light load vs. remaining capacity. Li-FeS2 stays flat for most of the life and
+# falls steeply at the end, an alkaline cell falls steadily. 1.0 V/cell = empty (cut-off).
+_LIFES2_CELL = [
+    (1.00, 0.0), (1.10, 1.0), (1.20, 3.0), (1.30, 7.0), (1.38, 13.0), (1.42, 22.0),
+    (1.45, 35.0), (1.48, 50.0), (1.52, 65.0), (1.57, 80.0), (1.63, 92.0), (1.70, 98.0),
+    (1.78, 100.0),
+]
+_ALKALINE_CELL = [
+    (1.00, 0.0), (1.05, 2.0), (1.10, 5.0), (1.15, 10.0), (1.20, 20.0), (1.25, 35.0),
+    (1.30, 50.0), (1.35, 65.0), (1.40, 78.0), (1.45, 88.0), (1.50, 95.0), (1.55, 99.0),
+    (1.60, 100.0),
+]
+BATTERY_CURVES = {"lifes2": _LIFES2_CELL, "alkaline": _ALKALINE_CELL}
+BATTERY_LOW_PCT = 5.0
+BATTERY_TRIM_RANGE = (0.8, 1.2)      # correction at most +-20 % (as in the tank hub)
+
+
+def battery_percent(vbat_v: float, kind: str = "alkaline", cells: int = 3) -> float:
+    v = vbat_v / cells
+    pts = BATTERY_CURVES.get(kind, _ALKALINE_CELL)
+    if v <= pts[0][0]:
+        return 0.0
+    if v >= pts[-1][0]:
+        return 100.0
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= v <= x1:
+            return y0 + (v - x0) * (y1 - y0) / (x1 - x0)
+    return 0.0
+
+
+def signal_pct(dbm: Optional[float]) -> Optional[int]:
+    """Signal strength in %, linear between -110 dBm (CC1101 sensitivity) and -50 dBm (as in the tank hub)."""
+    if dbm is None:
         return None
-    return max(0, min(100, round((mv - 3000) / 16)))
+    return round(min(100.0, max(0.0, (dbm + 110) / 60 * 100)))
 
 
 class Core:
@@ -479,7 +510,7 @@ class Core:
         return self.db.all("SELECT * FROM nodes ORDER BY position, id")
 
     def update_node(self, nid: int, name: Optional[str] = None, rev_ms: Optional[float] = None,
-                    ppr: Optional[int] = None) -> None:
+                    ppr: Optional[int] = None, battery_type: Optional[str] = None) -> None:
         """Name and calibration: wind speed [m/s] at one revolution per second and reed
         pulses per revolution. The stored factor (km/h per 1 pulse/s) follows from them."""
         node = self.node(nid)
@@ -496,6 +527,31 @@ class Core:
                 raise ValueError("pulzů na otáčku 1–16")
             self.db.execute("UPDATE nodes SET rev_ms=?, ppr=?, factor=? WHERE id=?",
                             (rev, p, rev * 3.6 / p, nid))
+        if battery_type is not None:
+            if battery_type not in BATTERY_CURVES:
+                raise ValueError("neznámý typ baterie")
+            self.db.execute("UPDATE nodes SET battery_type=? WHERE id=?", (battery_type, nid))
+
+    def battery_calibrate(self, nid: int, actual_v: float) -> float:
+        """Correction of the battery measurement from a voltmeter reading (as in the tank hub):
+        trim = measured / reported voltage of the last packet."""
+        last = self.db.one("SELECT vbat_mv FROM samples WHERE node_id=? AND vbat_mv IS NOT NULL "
+                           "ORDER BY ts DESC LIMIT 1", (nid,))
+        if not last or not last["vbat_mv"]:
+            raise LookupError("Chybí měření baterie.")
+        trim = actual_v * 1000.0 / last["vbat_mv"]
+        if not BATTERY_TRIM_RANGE[0] <= trim <= BATTERY_TRIM_RANGE[1]:
+            raise ValueError("Korekce mimo povolený rozsah ±20 % – zkontrolujte měření.")
+        trim = round(trim, 4)
+        self.db.execute("UPDATE nodes SET battery_trim=? WHERE id=?", (trim, nid))
+        return trim
+
+    def battery(self, node: dict, vbat_mv: Optional[float]) -> tuple[Optional[float], Optional[float]]:
+        """(voltage after the correction, percent by the battery type) of a raw reading."""
+        if vbat_mv is None:
+            return None, None
+        v = vbat_mv / 1000.0 * float(node.get("battery_trim") or 1.0)
+        return v, battery_percent(v, node.get("battery_type") or "alkaline")
 
     def state(self, nid: int) -> Optional[dict]:
         node = self.node(nid)
@@ -507,6 +563,7 @@ class Core:
         out = {
             "id": nid, "hex": f"{nid:04X}", "name": node["name"], "factor": f,
             "rev_ms": node["rev_ms"], "ppr": node["ppr"],
+            "battery_type": node.get("battery_type") or "alkaline", "battery_trim": node.get("battery_trim") or 1.0,
             "clock": round(node["clock"], 4), "unpair": bool(node["unpair"]), "paired": bool(node["k_mac"]),
             "fw": node.get("fw"), "status": "offline", "last_seen": None,
             "speed_kmh": None, "gust_kmh": None, "avg10_kmh": None, "avg1h_kmh": None,
@@ -529,8 +586,10 @@ class Core:
         bat = self.db.one("SELECT vbat_mv FROM samples WHERE node_id=? AND vbat_mv IS NOT NULL "
                           "ORDER BY ts DESC LIMIT 1", (nid,))
         if bat:
-            out["battery_v"] = round(bat["vbat_mv"] / 1000, 2)
-            out["battery_pct"] = battery_pct(bat["vbat_mv"])
+            v, pct = self.battery(node, bat["vbat_mv"])
+            out["battery_v"] = round(v, 3)
+            out["battery_pct"] = round(pct)
+            out["battery_low"] = out["battery_low"] or pct < BATTERY_LOW_PCT
         for key, span in (("avg10_kmh", 600), ("avg1h_kmh", 3600)):
             a = self.db.one("SELECT SUM(pulses) p, SUM(secs) s FROM samples WHERE node_id=? AND ts>?",
                             (nid, now - span))
@@ -549,7 +608,7 @@ class Core:
             expected = (now - d["t0"]) / (d["s"] / d["n"])
             out["loss_pct"] = round(max(0.0, 100 * (1 - d["n"] / max(expected, d["n"]))), 1)
         if out["rssi"] is not None:
-            out["link_pct"] = max(0, min(100, round((out["rssi"] + 110) * 2)))   # -110 dBm 0 %, -60 dBm 100 %
+            out["link_pct"] = signal_pct(out["rssi"])
         return out
 
     def states(self) -> list[dict]:
@@ -575,11 +634,24 @@ class Core:
                 "MAX(gust_pulses * 1.0 / gust_secs) g, AVG(vbat_mv) v, AVG(rssi) r "
                 "FROM samples WHERE node_id=? AND ts BETWEEN ? AND ? GROUP BY ts / ? ORDER BY t",
                 (bucket, bucket, bucket, nid, frm, to, bucket))
+        bats = [self.battery(node or {}, r["v"]) for r in rows]
+        # sensor power-ups (battery inserted) and watchdog restarts: marks in the battery chart
+        boots = self.db.all("SELECT ts, flags FROM samples WHERE node_id=? AND ts BETWEEN ? AND ? "
+                            "AND (flags & ?) != 0 ORDER BY ts LIMIT 200", (nid, frm, to, FLAG_BOOT | FLAG_WDT))
         return {
             "bucket": bucket,
+            "bucket_s": bucket or 60,
+            "first_ts": self._first_ts(nid),
             "t": [r["t"] for r in rows],
             "speed": [round(r["p"] / r["s"] * f, 1) if r["s"] else None for r in rows],
             "gust": [round(r["g"] * f, 1) if r["g"] is not None else None for r in rows],
-            "battery": [round(r["v"] / 1000, 2) if r["v"] else None for r in rows],
+            "vbat": [None if v is None else round(v, 3) for v, _ in bats],
+            "bat_pct": [None if p is None else round(p, 1) for _, p in bats],
             "rssi": [round(r["r"], 1) if r["r"] is not None else None for r in rows],
+            "boots": [{"t": b["ts"] * 1000, "wdt": not b["flags"] & FLAG_BOOT} for b in boots],
         }
+
+    def _first_ts(self, nid: int) -> Optional[int]:
+        """First stored measurement in ms (the charts cannot scroll further back)."""
+        t = self.db.scalar("SELECT MIN(ts) FROM samples WHERE node_id=?", (nid,))
+        return None if t is None else int(t) * 1000

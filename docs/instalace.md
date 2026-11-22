@@ -97,6 +97,9 @@ journalctl -u vitr -f          # log
    uschová, a když se najde, stačí u něj v *Čidla v dosahu* (pokročilá nastavení) kliknout
    **Spárovat znovu**. Naměřená data zůstávají.
 6. Druhý anemometr stejně.
+7. V **Nastavení → název anemometru** zvolte **typ baterie** (lithiové / alkalické), podle něj se
+   z napětí počítají procenta. Když údaj nesedí s voltmetrem, v pokročilém nastavení
+   **Kalibrace měření baterie** zadejte změřené napětí – hub spočítá korekci (jako u retenčky).
 
 ## 4. Home Assistant
 

@@ -690,12 +690,17 @@ def make_handler(app: App):
                     rev_ms = float(rev) / 3.6 if b.get("rev_unit") == "kmh" else float(rev)
                 ppr = b.get("ppr")
                 core.update_node(nid, name=b.get("name"), rev_ms=rev_ms,
-                                 ppr=None if ppr in (None, "") else int(ppr))
+                                 ppr=None if ppr in (None, "") else int(ppr),
+                                 battery_type=b.get("battery_type") or None)
                 new = core.node(nid)
                 if old and new:
                     changes = []
                     if old["name"] != new["name"]:
                         changes.append(f"název {old['name']!r} → {new['name']!r}")
+                    if old.get("battery_type") != new.get("battery_type"):
+                        kinds = {"lifes2": "lithiové", "alkaline": "alkalické"}
+                        changes.append(f"baterie {kinds.get(old.get('battery_type'), '?')} → "
+                                       f"{kinds.get(new.get('battery_type'), '?')}")
                     if abs(old["rev_ms"] - new["rev_ms"]) > 1e-9 or old["ppr"] != new["ppr"]:
                         changes.append(f"1 ot/s = {old['rev_ms']:g} → {new['rev_ms']:g} m/s, "
                                        f"pulzů/ot {old['ppr']} → {new['ppr']}")
@@ -703,6 +708,21 @@ def make_handler(app: App):
                         core.audit("CALIBRATION", f"{core.label(nid)}: " + "; ".join(changes), me, ip)
                 app.mqtt.notify(nid)
                 return self._json({"ok": True})
+            if p == "/api/node/battery":
+                nid = int(b["id"])
+                if core.node(nid) is None:
+                    return self._err(404, "Neznámé čidlo.")
+                try:
+                    actual = float(str(b.get("actual_v")).replace(",", "."))
+                except ValueError:
+                    return self._err(400, "Zadejte změřené napětí.")
+                try:
+                    trim = core.battery_calibrate(nid, actual)
+                except (LookupError, ValueError) as e:
+                    return self._err(400, str(e.args[0]))
+                core.audit("CALIBRATION", f"{core.label(nid)}: korekce baterie {trim:.4f}", me, ip)
+                app.mqtt.notify(nid)
+                return self._json({"ok": True, "battery_trim": trim})
             if p == "/api/mqtt":
                 cfg = app.mqtt_cfg(with_password=True)
                 cfg.pop("uid", None)

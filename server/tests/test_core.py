@@ -119,6 +119,31 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(st["battery_v"], 4.5)
         self.assertNotIn("temperature", st)              # no thermometer in the anemometer
 
+    def test_battery_like_tank_hub(self):
+        """Percent by battery type, voltmeter correction, signal in % (as in the tank hub)."""
+        n = FakeNode()
+        self.pair(n)
+        self.clock.t += 60
+        self.core.on_datagram(dgram(n.data(pulses=10, gust=1)))     # 4.5 V = 1.5 V/cell
+        st = self.core.state(n.nid)
+        self.assertEqual(st["battery_type"], "alkaline")
+        self.assertEqual(st["battery_pct"], 95)
+        self.core.update_node(n.nid, battery_type="lifes2")
+        self.assertEqual(self.core.state(n.nid)["battery_pct"], 58)  # flat Li-FeS2 curve
+        with self.assertRaises(ValueError):
+            self.core.update_node(n.nid, battery_type="nimh")
+        self.assertEqual(self.core.battery_calibrate(n.nid, 4.41), 0.98)
+        st = self.core.state(n.nid)
+        self.assertEqual(st["battery_v"], 4.41)
+        with self.assertRaises(ValueError):                 # more than +-20 %
+            self.core.battery_calibrate(n.nid, 3.0)
+        h = self.core.history(n.nid, int(self.clock.t) - 3600, int(self.clock.t))
+        self.assertEqual(h["vbat"][-1], 4.41)
+        self.assertIsNotNone(h["bat_pct"][-1])
+        self.assertEqual(h["first_ts"], h["t"][0] * 1000)
+        from vitr.core import signal_pct
+        self.assertEqual([signal_pct(x) for x in (-120, -110, -80, -50, -40)], [0, 0, 50, 100, 100])
+
     def test_factor_changes_history(self):
         n = FakeNode()
         self.pair(n)
