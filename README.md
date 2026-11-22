@@ -49,7 +49,7 @@ flowchart LR
 | pulses | u16 | pulzů v okně |
 | gust_pulses | u16 | max. pulzů za 3 s v okně |
 | window_s | u8 | délka okna [s] podle hodin čidla |
-| temp_c | i8 | teplota čipu [°C] (−128 = neznámá) |
+| temp_c | i8 | teplota čipu [°C] – jen pro mrazovou pojistku v čidle, hub ji neukládá ani neukazuje (anemometr nemá teploměr) |
 | fw, diag, vbat_sag | u8 | verze, diagnostika, pokles baterie při TX |
 
 Typy paketů **0x13–0x16** (retenčka 0x03–0x06) a jiné odvození klíčů (`ANM-…`) – hub retenčky

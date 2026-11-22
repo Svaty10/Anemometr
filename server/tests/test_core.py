@@ -117,7 +117,7 @@ class CoreTest(unittest.TestCase):
         self.assertAlmostEqual(st["speed_kmh"], 12.0, delta=0.2)     # 5 Hz * 2.4
         self.assertAlmostEqual(st["gust_kmh"], 19.2, delta=0.3)
         self.assertEqual(st["battery_v"], 4.5)
-        self.assertEqual(st["temperature"], 12)
+        self.assertNotIn("temperature", st)              # no thermometer in the anemometer
 
     def test_factor_changes_history(self):
         n = FakeNode()

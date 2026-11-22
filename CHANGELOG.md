@@ -3,6 +3,11 @@
 Formát dle [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), verze dle [SemVer](https://semver.org/).
 Postup vydání nové verze: [docs/vydani.md](docs/vydani.md).
 
+## [1.1.2] - 2026-11-22
+
+### Změněno
+- **Bez teploty:** anemometr nemá teploměr, takže web ani Home Assistant už neukazují „Teplotu čidla“ (byla to jen teplota uvnitř čipu ATtiny, kterou čidlo potřebuje pro mrazovou pojistku baterie) a hub ji neukládá. Entita teploty v Home Assistantu se sama smaže.
+
 ## [1.1.1] - 2026-11-22
 
 ### Opraveno

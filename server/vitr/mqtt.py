@@ -26,6 +26,10 @@ KEEPALIVE_S = 60
 PING_S = 30
 REFRESH_S = 60
 
+# entities of older versions: their retained config is deleted, so they vanish from HA
+# ("teplota" = the ATtiny's own chip temperature; the anemometer has no thermometer)
+OBSOLETE = ("teplota",)
+
 SENSORS = [
     # object, name, extra config
     ("rychlost", "Rychlost větru", {"value_template": "{{ value_json.speed_kmh }}", "unit_of_measurement": "km/h",
@@ -40,9 +44,6 @@ SENSORS = [
                             "device_class": "battery", "state_class": "measurement"}),
     ("napeti", "Napětí baterie", {"value_template": "{{ value_json.battery_v }}", "unit_of_measurement": "V",
                                   "device_class": "voltage", "state_class": "measurement",
-                                  "entity_category": "diagnostic"}),
-    ("teplota", "Teplota čidla", {"value_template": "{{ value_json.temperature }}", "unit_of_measurement": "°C",
-                                  "device_class": "temperature", "state_class": "measurement",
                                   "entity_category": "diagnostic"}),
     ("signal", "Signál", {"value_template": "{{ value_json.rssi }}", "unit_of_measurement": "dBm",
                           "device_class": "signal_strength", "state_class": "measurement",
@@ -246,6 +247,11 @@ class Mqtt:
         st = self.core.state(nid)
         if st is None:
             return
+        for obj in OBSOLETE:
+            topic = f"{DISCOVERY}/sensor/vitr_{self.uid}_{st['hex']}/{obj}/config"
+            if topic not in self._published:
+                self._writer.write(publish_packet(topic, b"", retain=True))
+                self._published.add(topic)
         for topic, cfg in discovery(self.uid, st):
             if topic not in self._published:
                 self._writer.write(publish_packet(topic, json.dumps(cfg, ensure_ascii=False).encode(), retain=True))
@@ -260,7 +266,7 @@ class Mqtt:
     def _remove(self, hexid: str) -> None:
         if not self._writer:
             return
-        for obj, _, _ in SENSORS:
+        for obj in [o for o, _, _ in SENSORS] + list(OBSOLETE):
             topic = f"{DISCOVERY}/sensor/vitr_{self.uid}_{hexid}/{obj}/config"
             self._writer.write(publish_packet(topic, b"", retain=True))
             self._published.discard(topic)

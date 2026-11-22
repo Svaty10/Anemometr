@@ -102,7 +102,7 @@ journalctl -u vitr -f          # log
 
 Nastavení → **Home Assistant (MQTT)**: stejný broker, jméno a heslo jako u retenčky. Každý
 anemometr se objeví jako zařízení s rychlostí, nárazem, průměrem 10 min, nejsilnějším
-nárazem dne, baterií, teplotou čidla a signálem.
+nárazem dne, baterií a signálem (teplotu anemometr neměří).
 
 ## 5. Přístup zvenku přes Cloudflare Tunnel
 

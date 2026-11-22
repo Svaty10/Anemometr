@@ -430,7 +430,6 @@
         const q = n.link_pct == null ? null : (n.link_pct >= 60 ? 'výborný' : n.link_pct >= 35 ? 'dobrý' : n.link_pct >= 15 ? 'slabý' : 'velmi slabý');
         $('txtRssi').textContent = n.rssi == null ? '–' : `${q} · ${n.link_pct} %`;
         $('txtLoss').textContent = n.rssi == null ? '–' : `${num(n.rssi, 0)} dBm` + (n.loss_pct == null ? '' : ` · ztráty 24 h ${num(n.loss_pct, 1, ' %')}`);
-        $('txtTemp').textContent = n.temperature == null ? '–' : num(n.temperature, 0, ' °C');
         $('txtBat').textContent = n.battery_pct == null ? '–' : n.battery_pct + ' %' + (n.battery_low ? ' – vyměnit' : '');
         $('txtBat').classList.toggle('bad-text', !!n.battery_low);
         $('txtBatV').textContent = n.battery_v == null ? '–' : num(n.battery_v, 2, ' V');

@@ -439,7 +439,7 @@ class Core:
             self.stats["replay"] += 1                     # repeated copy or replay
             return
         self.db.execute("UPDATE nodes SET last_ctr=? WHERE id=?", (ctr, nid))
-        flags, vbat, pulses, gust, window_s, temp_c, fw, diag, sag = fields
+        flags, vbat, pulses, gust, window_s, _temp, fw, diag, sag = fields
         now = self.now()
         clock = self._learn_clock(node, ctr, now, window_s)
         secs = max(1.0, window_s * clock)
@@ -447,7 +447,7 @@ class Core:
             "INSERT INTO samples(node_id, ts, secs, pulses, gust_pulses, gust_secs, vbat_mv, temp_c, rssi, flags) "
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (nid, int(now), secs, pulses, gust, GUST_NODE_S * clock,
-             None if vbat == U16_INVALID else vbat, None if temp_c == TEMP_INVALID else temp_c,
+             None if vbat == U16_INVALID else vbat, None,       # no thermometer: chip temperature not stored
              rssi, flags))
         self.db.execute("UPDATE nodes SET fw=?, diag=?, sag=? WHERE id=?", (fw, diag, sag, nid))
         self.stats["data"] += 1
@@ -511,7 +511,7 @@ class Core:
             "fw": node.get("fw"), "status": "offline", "last_seen": None,
             "speed_kmh": None, "gust_kmh": None, "avg10_kmh": None, "avg1h_kmh": None,
             "gust_today_kmh": None, "gust_today_ts": None, "loss_pct": None, "link_pct": None,
-            "battery_v": None, "battery_pct": None, "battery_low": False, "temperature": None,
+            "battery_v": None, "battery_pct": None, "battery_low": False,
             "rssi": None, "stuck": False,
         }
         if last is None:
@@ -522,7 +522,7 @@ class Core:
             "last_seen": last["ts"],
             "speed_kmh": round(last["pulses"] / last["secs"] * f, 1),
             "gust_kmh": round(last["gust_pulses"] / last["gust_secs"] * f, 1),
-            "temperature": last["temp_c"], "rssi": last["rssi"],
+            "rssi": last["rssi"],
             "battery_low": bool(last["flags"] & FLAG_BAT_LOW),
             "stuck": bool(last["flags"] & FLAG_STUCK),
         })
@@ -567,12 +567,12 @@ class Core:
                 break
         if bucket == 0:
             rows = self.db.all(
-                "SELECT ts t, pulses p, secs s, gust_pulses * 1.0 / gust_secs g, vbat_mv v, temp_c c, rssi r "
+                "SELECT ts t, pulses p, secs s, gust_pulses * 1.0 / gust_secs g, vbat_mv v, rssi r "
                 "FROM samples WHERE node_id=? AND ts BETWEEN ? AND ? ORDER BY ts", (nid, frm, to))
         else:
             rows = self.db.all(
                 "SELECT (ts / ?) * ? + ? / 2 t, SUM(pulses) p, SUM(secs) s, "
-                "MAX(gust_pulses * 1.0 / gust_secs) g, AVG(vbat_mv) v, AVG(temp_c) c, AVG(rssi) r "
+                "MAX(gust_pulses * 1.0 / gust_secs) g, AVG(vbat_mv) v, AVG(rssi) r "
                 "FROM samples WHERE node_id=? AND ts BETWEEN ? AND ? GROUP BY ts / ? ORDER BY t",
                 (bucket, bucket, bucket, nid, frm, to, bucket))
         return {
@@ -581,6 +581,5 @@ class Core:
             "speed": [round(r["p"] / r["s"] * f, 1) if r["s"] else None for r in rows],
             "gust": [round(r["g"] * f, 1) if r["g"] is not None else None for r in rows],
             "battery": [round(r["v"] / 1000, 2) if r["v"] else None for r in rows],
-            "temp": [round(r["c"], 1) if r["c"] is not None else None for r in rows],
             "rssi": [round(r["r"], 1) if r["r"] is not None else None for r in rows],
         }
