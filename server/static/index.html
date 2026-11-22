@@ -32,6 +32,13 @@
         <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11.5 12 5l8 6.5M6.5 10v9.5h11V10"/></symbol>
         <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9" rx="1.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></symbol>
         <symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 19.5h16M6.5 16.5v-5M11 16.5V7M15.5 16.5v-7M20 16.5V5"/></symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 2.8 19.5h18.4z"/><path d="M12 10v4.2M12 17.2v.1"/></symbol>
+        <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="3.8"/><path d="M10.8 12.8 19 4.5M15.5 8l2.3 2.3M13.3 10.2l1.8 1.8"/></symbol>
+        <symbol id="i-block" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+        <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 19.5c1.2-3.3 3.8-5 7-5s5.8 1.7 7 5"/></symbol>
+        <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="9" r="3.2"/><path d="M3 19c1-3 3.2-4.5 6-4.5s5 1.5 6 4.5"/><path d="M15.5 6a3 3 0 0 1 0 6M17.5 14.8c1.7.6 2.9 2 3.5 4.2"/></symbol>
+        <symbol id="i-ruler" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="1"/><path d="M7 8v3M11 8v4M15 8v3"/></symbol>
+        <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/></symbol>
     </defs>
 </svg>
 
@@ -43,7 +50,8 @@
         </div>
         <nav class="main-nav" aria-label="Hlavní navigace">
             <button class="nav-tab active" data-tab="dashboard" type="button">Přehled</button>
-            <button class="nav-tab" data-tab="nastaveni" type="button">Nastavení</button>
+            <button class="nav-tab admin-only hidden" data-tab="nastaveni" type="button">Nastavení</button>
+            <button class="nav-tab admin-only hidden" data-tab="logovani" type="button">Historie událostí</button>
         </nav>
         <span class="status-pill" id="statusPill" role="status">Načítám…</span>
         <div class="account">
@@ -55,8 +63,13 @@
             <div class="menu hidden" id="accountMenu" role="menu" aria-labelledby="accountBtn">
                 <div class="menu-head">
                     <span class="avatar avatar-lg" id="menuInitial" aria-hidden="true">?</span>
-                    <div class="menu-who"><strong id="userBadge">Správce</strong><span id="userRole">může měnit nastavení</span></div>
+                    <div class="menu-who"><strong id="userBadge"></strong><span id="userRole"></span></div>
                 </div>
+                <div class="menu-sep" role="separator"></div>
+                <button class="menu-item" data-tab="heslo" type="button" role="menuitem">
+                    <svg class="ico" aria-hidden="true"><use href="#i-user"/></svg>Můj účet</button>
+                <button class="menu-item admin-only hidden" data-tab="uzivatele" type="button" role="menuitem">
+                    <svg class="ico" aria-hidden="true"><use href="#i-users"/></svg>Správa uživatelů</button>
                 <div class="menu-sep" role="separator"></div>
                 <div class="menu-theme" role="group" aria-label="Motiv">
                     <span class="menu-theme-label">Motiv</span>
@@ -81,7 +94,8 @@
         <div id="emptyState" class="card empty-card hidden">
             <svg class="ico" aria-hidden="true"><use href="#i-wind"/></svg>
             <h2>Zatím žádný anemometr</h2>
-            <p class="muted">V <b>Nastavení → Čidla</b> klikněte na <b>Čekat na nové čidlo</b> a pak do anemometru vložte baterii.</p>
+            <p class="muted admin-only hidden">V <b>Nastavení → Čidla</b> klikněte na <b>Čekat na nové čidlo</b> a pak do anemometru vložte baterii.</p>
+            <p class="muted user-only">Anemometr zatím spáruje administrátor.</p>
         </div>
 
         <!-- Všechny anemometry (volba v liště, když jsou aspoň dva) -->
@@ -160,7 +174,7 @@
         <div class="page-head"><h1>Nastavení</h1></div>
 
 
-        <div class="set-layout hidden" id="setLayout">
+        <div class="set-layout" id="setLayout">
             <nav class="set-nav" id="setNav" aria-label="Části nastavení"></nav>
             <div class="stack" id="setStack">
                 <section class="card" id="cardNodes" data-nav="Čidla" data-group="Anemometry">
@@ -208,19 +222,6 @@
                     </form>
                 </section>
 
-                <section class="card" id="cardAccount" data-nav="Heslo" data-group="Systém">
-                    <div class="card-title">
-                        <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-lock"/></svg></span>
-                        <div><h2>Heslo správce</h2><p class="card-desc">Heslo pro změny nastavení tohoto webu.</p></div>
-                    </div>
-                    <form id="pwForm">
-                        <div class="form-row">
-                            <div class="form-group"><label for="pwOld">Současné heslo</label><input type="password" id="pwOld" class="unified-input" autocomplete="current-password" required></div>
-                            <div class="form-group"><label for="pwNew">Nové heslo (min. 10 znaků)</label><input type="password" id="pwNew" class="unified-input" autocomplete="new-password" minlength="10" maxlength="256" required></div>
-                        </div>
-                        <div class="inline-actions"><button class="btn btn-outline" type="submit">Změnit heslo</button></div>
-                    </form>
-                </section>
 
                 <section class="card" id="cardDiag" data-nav="Diagnostika" data-group="Systém">
                     <div class="card-title">
@@ -230,6 +231,109 @@
                     <dl class="kv" id="diagKv"></dl>
                 </section>
             </div>
+        </div>
+    </div>
+
+    <!-- ======================================================= HISTORIE UDÁLOSTÍ -->
+    <div id="logovani" class="tab-content">
+        <div class="page-head"><h1>Historie událostí</h1></div>
+        <div class="stack">
+            <section class="card">
+                <div class="log-chips" id="logChips" role="group" aria-label="Kategorie">
+                    <button type="button" class="chip active" data-cat="">Vše</button>
+                    <button type="button" class="chip" data-cat="sensors">Čidla</button>
+                    <button type="button" class="chip" data-cat="settings">Nastavení</button>
+                    <button type="button" class="chip" data-cat="login">Přihlášení</button>
+                    <button type="button" class="chip" data-cat="users">Uživatelé</button>
+                    <button type="button" class="chip chip-danger" data-cat="problems">Problémy</button>
+                </div>
+                <div class="log-filters">
+                    <select id="logWho" class="unified-select" aria-label="Kdo">
+                        <option value="">Všichni</option>
+                        <option value="people">Jen uživatelé</option>
+                        <option value="system">Jen automatika</option>
+                    </select>
+                    <input type="search" id="logSearch" class="unified-input" placeholder="Hledat…" aria-label="Hledat">
+                    <input type="date" id="logFrom" class="unified-input" title="Od">
+                    <input type="date" id="logTo" class="unified-input" title="Do">
+                    <button class="btn btn-outline" id="auditRefresh" type="button">Obnovit</button>
+                </div>
+                <div class="log-summary muted small" id="logSummary"></div>
+                <div class="log-list" id="auditList"></div>
+                <div class="audit-pagination" id="auditPagination"></div>
+            </section>
+        </div>
+    </div>
+
+    <!-- ======================================================= UŽIVATELÉ -->
+    <div id="uzivatele" class="tab-content">
+        <div class="page-head"><h1>Správa uživatelů</h1></div>
+        <section class="card">
+            <div class="table-responsive">
+                <table class="user-table">
+                    <thead><tr><th>Jméno</th><th>Role</th><th>Poslední přihlášení</th><th>Akce</th></tr></thead>
+                    <tbody id="usersBody"></tbody>
+                </table>
+            </div>
+            <form id="userPwForm" class="config-form hidden">
+                <h3 id="userPwTitle">Nové heslo</h3>
+                <p class="muted small">Uživatel bude po změně hesla odhlášen ze všech zařízení.</p>
+                <div class="form-row">
+                    <div class="form-group"><label for="userPw">Nové heslo (min. 10 znaků)</label><input type="password" id="userPw" class="unified-input" required minlength="10" autocomplete="new-password"></div>
+                    <div class="form-group"><label for="userPw2">Potvrzení hesla</label><input type="password" id="userPw2" class="unified-input" required minlength="10" autocomplete="new-password"></div>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Nastavit heslo</button>
+                    <button type="button" class="btn btn-outline" id="userPwCancel">Zrušit</button>
+                </div>
+            </form>
+            <div class="config-form">
+                <form id="addUserForm">
+                    <h3>Přidat nového uživatele</h3>
+                    <div class="form-row">
+                        <div class="form-group"><label for="newUsername">Jméno</label><input type="text" id="newUsername" class="unified-input" required maxlength="32" autocomplete="off"></div>
+                        <div class="form-group">
+                            <label for="newRole">Role</label>
+                            <select id="newRole" class="unified-select">
+                                <option value="user">Uživatel (jen čtení)</option>
+                                <option value="admin">Administrátor</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group"><label for="newPassword">Heslo (min. 10 znaků)</label><input type="password" id="newPassword" class="unified-input" required minlength="10" autocomplete="new-password"></div>
+                        <div class="form-group"><label for="newPasswordConfirm">Potvrzení hesla</label><input type="password" id="newPasswordConfirm" class="unified-input" required minlength="10" autocomplete="new-password"></div>
+                    </div>
+                    <div class="form-actions"><button type="submit" class="btn btn-primary">Přidat uživatele</button></div>
+                </form>
+            </div>
+        </section>
+    </div>
+
+    <!-- ======================================================= MŮJ ÚČET -->
+    <div id="heslo" class="tab-content">
+        <div class="page-head"><h1>Můj účet</h1></div>
+        <div class="stack narrow">
+            <section class="card account-card">
+                <h2>Změna hesla</h2>
+                <p class="muted">Heslo musí mít alespoň 10 znaků. Po změně budou odhlášena všechna ostatní zařízení.</p>
+                <form id="pwForm" class="config-form">
+                    <div class="form-group">
+                        <label for="pwOld">Současné heslo</label>
+                        <input type="password" id="pwOld" class="unified-input" required autocomplete="current-password">
+                    </div>
+                    <div class="form-group">
+                        <label for="pwNew">Nové heslo</label>
+                        <input type="password" id="pwNew" class="unified-input" required minlength="10" autocomplete="new-password">
+                    </div>
+                    <div class="form-group">
+                        <label for="pwNew2">Potvrzení nového hesla</label>
+                        <input type="password" id="pwNew2" class="unified-input" required minlength="10" autocomplete="new-password">
+                    </div>
+                    <div class="form-actions"><button type="submit" class="btn btn-primary">Uložit nové heslo</button></div>
+                </form>
+                <p class="muted small mt-20" id="aboutLine"></p>
+            </section>
         </div>
     </div>
 </div>

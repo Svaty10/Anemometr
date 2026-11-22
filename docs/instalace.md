@@ -36,10 +36,28 @@ cd ~/Anemometr && git pull && sudo bash system/install.sh
 ```
 
 Skript založí uživatele `vitr`, nainstaluje aplikaci do `/opt/vitr`, službu `vitr.service`,
-spustí ji a vypíše adresu webu a **heslo správce** (`sudo cat /var/lib/vitr/heslo.txt`).
-Bez přihlášení web neukáže nic (ani data) – jen přihlašovací stránku. Po prvním přihlášení
-heslo změňte v Nastavení → Heslo (min. 10 znaků); soubor `heslo.txt` se tím smaže a ostatní
-přihlášená zařízení se odhlásí. Data v `/var/lib/vitr` při aktualizaci zůstávají. Port webu: `VITR_WEB_PORT=…` v
+spustí ji a vypíše adresu webu a **kód pro první přihlášení**. Data v `/var/lib/vitr` při
+aktualizaci zůstávají.
+
+### Uživatelé (stejně jako u retenčky)
+
+Bez přihlášení web neukáže nic (ani data) – jen přihlašovací stránku.
+
+1. **První přihlášení:** jméno `admin` a kód z instalace (kdykoli znovu:
+   `sudo cat /var/lib/vitr/setup_code`).
+2. Hned si vytvoříte **vlastní účet administrátora** (jméno + heslo, min. 10 znaků). Výchozí
+   přístup `admin` + kód tím přestane platit.
+3. Další lidi přidáte v menu účtu → **Správa uživatelů**:
+   - **Administrátor** – nastavení, párování čidel, kalibrace, Home Assistant, uživatelé,
+     historie událostí;
+   - **Uživatel (jen čtení)** – přehled a grafy, vlastní heslo.
+4. Vlastní heslo: menu účtu → **Můj účet** (ostatní zařízení se odhlásí). Administrátor může
+   jinému uživateli nastavit nové heslo (ten se odhlásí všude), změnit roli nebo ho smazat;
+   poslední administrátor zůstat musí.
+5. **Historie událostí** (jen administrátor): přihlášení i neúspěšná, změny uživatelů,
+   párování a odebrání čidel, kalibrace, nastavení.
+
+Účty jsou vlastní pro vitr (vlastní databáze), nesdílí se s retenčkou. Port webu: `VITR_WEB_PORT=…` v
 `/etc/default/vitr` a `sudo systemctl restart vitr`.
 
 ```bash
@@ -51,7 +69,7 @@ journalctl -u vitr -f          # log
 
 1. Nahrát firmware do čidla: `uzel/2-novy-cip.cmd` (nový čip) nebo `uzel/3-aktualizace-firmwaru.cmd`
    – použije přeložený `uzel/build/firmware.hex`.
-2. Web `http://retencka.local:8080` → přihlásit → **Nastavení** → **Čekat na nové čidlo**.
+2. Web `http://retencka.local:8080` → přihlásit (administrátor) → **Nastavení** → **Čekat na nové čidlo**.
 3. Vložit do anemometru baterii. Do minuty se objeví jako „Anemometr 1“; přejmenovat a
    nastavit kalibraci „1 otáčka za sekundu = X m/s“ podle popisu anemometru a počet pulzů na
    otáčku (výchozí 0,667 m/s = 2,4 km/h a 1 pulz).
@@ -65,7 +83,7 @@ nárazem dne, baterií, teplotou čidla a signálem.
 
 ## 5. Přístup zvenku přes Cloudflare Tunnel
 
-Web je celý za heslem, takže ho lze vystavit ven. Doporučený postup je `cloudflared`
+Web je celý za přihlášením, takže ho lze vystavit ven. Doporučený postup je `cloudflared`
 **přímo na Pi** s cílem `http://localhost:8080` (Public Hostname → Service `HTTP`,
 `localhost:8080`):
 
@@ -73,9 +91,12 @@ Web je celý za heslem, takže ho lze vystavit ven. Doporučený postup je `clou
   `CF-Connecting-IP` a `X-Forwarded-Proto`: omezení pokusů o přihlášení počítá se skutečnou IP
   návštěvníka, cookie dostane příznak `Secure` a odpovědi hlavičku HSTS.
 - Z jiných adres než loopback se těmto hlavičkám nevěří (nelze je podvrhnout z LAN).
-- Po 3 chybných heslech z jedné IP se další pokus odkládá 2, 4, 8 … s (max. 1 h).
-- Session: cookie `HttpOnly`, `SameSite=Strict`, platnost 7 dní nečinnosti / 30 dní celkem.
-- Změny (POST) jen jako JSON a se stejným `Origin` – ochrana proti CSRF; přísné CSP,
+- Po 3 chybných heslech z jedné IP se další pokus odkládá 2, 4, 8 … s (max. 1 h); po 5
+  chybách na jedno jméno z jedné IP je jméno z té IP 15 min zamčené (skutečného majitele
+  z jiné adresy to neblokuje).
+- Relace na serveru (uložený jen otisk SHA-256), cookie `HttpOnly`, `SameSite=Strict`,
+  platnost 7 dní nečinnosti / 30 dní celkem.
+- Změny (POST) jen jako JSON, s CSRF tokenem relace a se stejným `Origin`; přísné CSP,
   zákaz vložení do rámu.
 
 Pro ještě vyšší bezpečnost lze v Cloudflare zapnout **Access** (přihlášení e-mailem před

@@ -17,6 +17,7 @@
     const STATUS = { online: 'online', stale: 'zpožděná data', offline: 'offline' };
 
     let STATE = null, ADMIN = false, CURRENT = null, VIEW_ALL = false;
+    const ME = { username: '', role: 'user', csrf: '', version: '' };
     try { VIEW_ALL = sessionStorage.getItem('viewAll') === '1'; } catch (e) { /* ignore */ }
     try { CURRENT = Number(localStorage.getItem('node')) || null; } catch (e) { /* ignore */ }
 
@@ -32,7 +33,7 @@
         const opt = { credentials: 'same-origin' };
         if (body !== undefined) {
             opt.method = 'POST';
-            opt.headers = { 'Content-Type': 'application/json' };
+            opt.headers = { 'Content-Type': 'application/json', 'X-CSRF-Token': ME.csrf };
             opt.body = JSON.stringify(body);
         }
         const r = await fetch(path, opt);
@@ -368,13 +369,17 @@
     }
 
     // ----------------------------------------------------------- nastavení
-    function setAdmin(v) {
-        ADMIN = v;
-        $('setLayout').classList.toggle('hidden', !v);
-        $('avatarInitial').textContent = $('menuInitial').textContent = v ? 'S' : '?';
-        $('userBadge').textContent = v ? 'Správce' : 'Host';
-        $('userRole').textContent = v ? 'může měnit nastavení' : 'jen prohlížení';
-        if (v) { loadMqtt(); renderSettings(); buildSetNav(); }
+    function applyMe() {
+        ADMIN = ME.role === 'admin';
+        const initial = (ME.username || '?').trim().charAt(0).toUpperCase() || '?';
+        $('avatarInitial').textContent = $('menuInitial').textContent = initial;
+        $('userBadge').textContent = ME.username;
+        $('userRole').textContent = ADMIN ? 'Administrátor' : 'Uživatel (jen čtení)';
+        $('accountBtn').title = `${ME.username} (${ADMIN ? 'administrátor' : 'uživatel'})`;
+        $('aboutLine').textContent = `Vítr ${ME.version}`;
+        document.querySelectorAll('.admin-only').forEach((el) => el.classList.toggle('hidden', !ADMIN));
+        document.querySelectorAll('.user-only').forEach((el) => el.classList.toggle('hidden', ADMIN));
+        if (ADMIN) { loadMqtt(); renderSettings(); buildSetNav(); }
     }
 
     function editing(el) { return el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT'; }
@@ -549,13 +554,193 @@
     }
 
     // --------------------------------------------------------------- obsluha
+    const ADMIN_TABS = ['nastaveni', 'logovani', 'uzivatele'];
     function showTab(tab) {
+        if (ADMIN_TABS.includes(tab) && !ADMIN) tab = 'dashboard';
         document.querySelectorAll('.nav-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
         document.querySelectorAll('.tab-content').forEach((c) => c.classList.toggle('active', c.id === tab));
+        try { sessionStorage.setItem('tab', tab); } catch (e) { /* ignore */ }
         if (STATE) render();
         if (tab === 'dashboard') reloadCharts();
+        if (tab === 'uzivatele') loadUsers();
+        if (tab === 'logovani') loadAuditLog(1);
     }
-    document.querySelectorAll('.nav-tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+    document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+        $('accountMenu').classList.add('hidden');
+        showTab(b.dataset.tab);
+    }));
+
+    // ---------------------------------------------------------------- uživatelé
+    const pad = (n) => String(n).padStart(2, '0');
+    let PW_FOR = null;
+
+    async function loadUsers() {
+        const body = $('usersBody');
+        let users;
+        try { users = await api('/api/users'); } catch (e) { toast(e.message, true); return; }
+        body.textContent = '';
+        users.forEach((u) => {
+            const self = u.username.toLowerCase() === ME.username.toLowerCase();
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td><strong>${esc(u.username)}</strong>${self ? ' (vy)' : ''}</td>
+                <td><select class="table-select" aria-label="Role"${self ? ' disabled' : ''}>
+                    <option value="user">Uživatel</option><option value="admin">Administrátor</option></select></td>
+                <td>${u.last_login ? fmtDateTime(u.last_login * 1000) : '–'}</td><td class="td-actions"></td>`;
+            const sel = tr.querySelector('select');
+            sel.value = u.role;
+            sel.addEventListener('change', async () => {
+                const to = sel.value;
+                const msg = to === 'admin' ? 'Administrátor může měnit nastavení, párovat čidla a spravovat uživatele.'
+                    : 'Uživatel uvidí data, ale nastavení měnit nemůže.';
+                if (!confirm(`Změnit roli uživatele ${u.username} na „${to === 'admin' ? 'Administrátor' : 'Uživatel (jen čtení)'}“?\n\n${msg}`)) {
+                    sel.value = u.role; return;
+                }
+                try { await api('/api/users/role', { username: u.username, role: to }); toast('Role změněna.'); } catch (e) { toast(e.message, true); }
+                loadUsers();
+            });
+            if (!self) {
+                const cell = tr.querySelector('.td-actions');
+                const pw = document.createElement('button');
+                pw.type = 'button'; pw.className = 'btn btn-outline btn-sm'; pw.textContent = 'Nové heslo';
+                pw.addEventListener('click', () => {
+                    PW_FOR = u.username;
+                    $('userPwTitle').textContent = `Nové heslo pro ${u.username}`;
+                    $('userPwForm').classList.remove('hidden');
+                    $('userPw').focus();
+                });
+                const del = document.createElement('button');
+                del.type = 'button'; del.className = 'btn btn-danger btn-sm'; del.textContent = 'Smazat';
+                del.addEventListener('click', async () => {
+                    if (!confirm(`Smazat uživatele ${u.username}? Bude odhlášen ze všech zařízení. Nejde to vzít zpět.`)) return;
+                    try { await api('/api/users/delete', { username: u.username }); toast('Uživatel smazán.'); } catch (e) { toast(e.message, true); }
+                    loadUsers();
+                });
+                cell.appendChild(pw); cell.appendChild(del);
+            }
+            body.appendChild(tr);
+        });
+    }
+
+    $('userPwCancel').addEventListener('click', () => { $('userPwForm').reset(); $('userPwForm').classList.add('hidden'); });
+    $('userPwForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if ($('userPw').value !== $('userPw2').value) { toast('Hesla se neshodují!', true); return; }
+        try {
+            await api('/api/users/password', { username: PW_FOR, password: $('userPw').value });
+            e.target.reset(); e.target.classList.add('hidden');
+            toast('Heslo nastaveno, uživatel byl odhlášen.');
+        } catch (err) { toast(err.message, true); }
+    });
+    $('addUserForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const p = $('newPassword').value;
+        if (p !== $('newPasswordConfirm').value) { toast('Hesla se neshodují!', true); return; }
+        try {
+            await api('/api/users/add', { username: $('newUsername').value.trim(), password: p, role: $('newRole').value });
+            e.target.reset();
+            toast('Uživatel přidán.');
+            loadUsers();
+        } catch (err) { toast(err.message, true); }
+    });
+
+    // ---------------------------------------------------------- historie událostí
+    // [ikona, text, závažnost]  závažnost: '' | ok | warn | bad | info
+    const ACTIONS = {
+        LOGIN_SUCCESS: ['key', 'Přihlášení', 'ok'], LOGIN_FAILED: ['block', 'Neúspěšné přihlášení', 'bad'],
+        LOGOUT: ['logout', 'Odhlášení', ''], SETUP_LOGIN: ['key', 'První přihlášení', 'warn'],
+        SETUP_FAILED: ['block', 'Neplatné výchozí přihlášení', 'bad'], PASSWORD_CHANGED: ['key', 'Změna hesla', ''],
+        USER_ADDED: ['user', 'Nový uživatel', 'ok'], USER_DELETED: ['user', 'Smazán uživatel', 'warn'],
+        USER_ROLE_CHANGED: ['user', 'Změna role', 'warn'],
+        SETTINGS_CHANGED: ['sliders', 'Změna nastavení', ''], CALIBRATION: ['ruler', 'Kalibrace', ''],
+        NODE_PAIRED: ['antenna', 'Čidlo spárováno', 'ok'], NODE_PAIRING: ['antenna', 'Čekání na párování', ''],
+        NODE_PAIRING_CANCELLED: ['antenna', 'Párování zrušeno', ''],
+        NODE_REMOVED: ['antenna', 'Čidlo odebráno', 'warn'], NODE_UNPAIR_REQUESTED: ['antenna', 'Odpárování zahájeno', 'warn'],
+        NODE_UNPAIRED: ['antenna', 'Čidlo odpárováno', 'warn'], NODE_UNPAIR_CANCELLED: ['antenna', 'Odpárování zrušeno', '']
+    };
+    const LOG = { page: 1, cat: '', lastDay: null };
+    const DAYS = ['neděle', 'pondělí', 'úterý', 'středa', 'čtvrtek', 'pátek', 'sobota'];
+
+    function dayTitle(t) {
+        const d = new Date(t), today = new Date(), y = new Date(Date.now() - 86400e3);
+        const same = (a, b) => a.toDateString() === b.toDateString();
+        if (same(d, today)) return 'Dnes';
+        if (same(d, y)) return 'Včera';
+        return `${DAYS[d.getDay()]} ${d.getDate()}. ${d.getMonth() + 1}. ${d.getFullYear()}`;
+    }
+
+    function auditQuery(page) {
+        const p = new URLSearchParams({ page: String(page) });
+        if (LOG.cat) p.set('category', LOG.cat);
+        if ($('logWho').value) p.set('who', $('logWho').value);
+        const q = $('logSearch').value.trim();
+        if (q) p.set('q', q);
+        if ($('logFrom').value) p.set('from', String(Math.floor(new Date($('logFrom').value + 'T00:00:00').getTime() / 1000)));
+        if ($('logTo').value) p.set('to', String(Math.floor(new Date($('logTo').value + 'T00:00:00').getTime() / 1000) + 86400));
+        return '/api/audit?' + p.toString();
+    }
+
+    async function loadAuditLog(page) {
+        const list = $('auditList');
+        if (page === 1) { list.innerHTML = '<div class="muted">Načítám…</div>'; LOG.lastDay = null; }
+        try {
+            const d = await api(auditQuery(page));
+            LOG.page = page;
+            if (page === 1) list.textContent = '';
+            const who = $('logWho');
+            const known = Array.from(who.options).map((o) => o.value);
+            (d.users || []).forEach((u) => {
+                if (!known.includes(u)) {
+                    const o = document.createElement('option');
+                    o.value = u; o.textContent = u;
+                    who.appendChild(o);
+                }
+            });
+            if (!d.logs.length && page === 1) list.innerHTML = '<div class="muted log-empty">Žádné záznamy</div>';
+            d.logs.forEach((l) => {
+                const t = l.ts * 1000;
+                const day = dayTitle(t);
+                if (day !== LOG.lastDay) {
+                    const h = document.createElement('div');
+                    h.className = 'log-day';
+                    h.textContent = day;
+                    list.appendChild(h);
+                    LOG.lastDay = day;
+                }
+                const [icon, text, sev] = ACTIONS[l.action] || ['dot', l.action, ''];
+                const sys = !l.username || l.username.startsWith('system');
+                const row = document.createElement('div');
+                row.className = 'log-row ' + (sev ? 'sev-' + sev : '');
+                const dt = new Date(t);
+                row.innerHTML = `<span class="log-time">${pad(dt.getHours())}:${pad(dt.getMinutes())}</span>
+                    <span class="log-what"><span class="log-icon">${ico(icon)}</span><span class="log-title">${esc(text)}</span></span>
+                    <span class="log-detail">${esc(l.detail || '')}</span>
+                    <span class="log-who"><span class="log-user ${sys ? 'sys' : ''}">${sys ? 'automatika' : esc(l.username)}</span>
+                    ${l.ip && !sys ? `<span class="log-ip">${esc(l.ip)}</span>` : ''}</span>`;
+                list.appendChild(row);
+            });
+            $('logSummary').textContent = `${d.total} záznamů`;
+            const pag = $('auditPagination');
+            pag.textContent = '';
+            if (page < d.total_pages) {
+                const b = document.createElement('button');
+                b.type = 'button'; b.className = 'btn btn-outline'; b.textContent = 'Načíst starší';
+                b.addEventListener('click', () => loadAuditLog(page + 1));
+                pag.appendChild(b);
+            }
+        } catch (e) {
+            list.innerHTML = `<div class="muted">${esc(e.message)}</div>`;
+        }
+    }
+
+    document.querySelectorAll('#logChips .chip').forEach((c) => c.addEventListener('click', () => {
+        document.querySelectorAll('#logChips .chip').forEach((x) => x.classList.toggle('active', x === c));
+        LOG.cat = c.dataset.cat;
+        loadAuditLog(1);
+    }));
+    ['logWho', 'logFrom', 'logTo'].forEach((id) => $(id).addEventListener('change', () => loadAuditLog(1)));
+    let searchT = null;
+    $('logSearch').addEventListener('input', () => { clearTimeout(searchT); searchT = setTimeout(() => loadAuditLog(1), 350); });
+    $('auditRefresh').addEventListener('click', () => loadAuditLog(1));
 
     const menu = $('accountMenu');
     $('accountBtn').addEventListener('click', (e) => {
@@ -569,7 +754,7 @@
     document.querySelectorAll('#themeSeg button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.themePick)));
     $('logoutBtn').addEventListener('click', async () => {
         menu.classList.add('hidden');
-        await api('/api/logout', {}).catch(() => {});
+        await api('/api/auth/logout', {}).catch(() => {});
         window.location.replace('/login');
     });
     $('pairBtn').addEventListener('click', async () => {
@@ -588,9 +773,10 @@
     $('pwForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         try {
-            await api('/api/password', { old: $('pwOld').value, new: $('pwNew').value });
+            if ($('pwNew').value !== $('pwNew2').value) { toast('Hesla se neshodují!', true); return; }
+            await api('/api/me/password', { old_password: $('pwOld').value, new_password: $('pwNew').value });
             e.target.reset();
-            toast('Heslo změněno – ostatní zařízení se musí přihlásit znovu');
+            toast('Heslo bylo změněno, ostatní zařízení byla odhlášena.');
         } catch (err) { toast(err.message, true); }
     });
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readTheme(); reloadCharts(); });
@@ -612,8 +798,12 @@
     (async () => {
         const me = await api('/api/me').catch(() => null);
         if (!me) return;
-        setAdmin(true);
+        Object.assign(ME, me);
+        applyMe();
         await refresh();
+        let tab = 'dashboard';
+        try { tab = sessionStorage.getItem('tab') || 'dashboard'; } catch (e) { /* ignore */ }
+        if (tab !== 'dashboard') showTab(tab);
         setInterval(refresh, 15000);
         setInterval(reloadCharts, 120000);
     })();

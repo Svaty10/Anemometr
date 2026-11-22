@@ -66,6 +66,18 @@ class Core:
         self.stats = {"frames": 0, "data": 0, "auth_fail": 0, "replay": 0, "pair_req": 0,
                       "last_frame": 0.0}
 
+    def audit(self, action: str, detail: str = "", user: str = "system", ip: str = "") -> None:
+        """One line of the event history (Historie událostí), like the tank hub."""
+        try:
+            self.db.execute("INSERT INTO audit(ts, username, ip, action, detail) VALUES(?,?,?,?,?)",
+                            (int(self.now()), (user or "")[:64], (ip or "")[:64], action, (detail or "")[:500]))
+        except Exception:
+            log.exception("audit write failed")
+
+    def label(self, nid: int) -> str:
+        n = self.node(nid)
+        return f"{n['name']} ({nid:04X})" if n else f"{nid:04X}"
+
     # ============================================================ radio
     def on_datagram(self, data: bytes) -> Optional[bytes]:
         """One datagram from the bridge. Returns the answer datagram or None."""
@@ -125,8 +137,10 @@ class Core:
             return None
         # the sensor holds no key
         if node and node["unpair"] and nid in self._unpair_sent:
+            label = self.label(nid)
             self.forget(nid)                              # it confirmed the unpairing
             log.info("Node %04X confirmed unpairing", nid)
+            self.audit("NODE_UNPAIRED", f"Čidlo {label} potvrdilo odpárování")
             node = None
         if now >= self.pair_until or self._hub_priv is None:
             return None                                   # only while the user waits for it
@@ -156,6 +170,7 @@ class Core:
         self._last_rx.pop(nid, None)
         self.heard.pop(nid, None)
         log.info("Node %04X paired", nid)
+        self.audit("NODE_PAIRED", f"Spárováno čidlo {self.label(nid)}")
 
     def request_unpair(self, nid: int, on: bool = True) -> None:
         with self.lock:

@@ -1,32 +1,33 @@
 """Web UI and JSON API (standard library HTTP server in its own thread).
 
-Everything needs the admin password (the web may be published through a
-Cloudflare tunnel): without a session only the login page, its script, the
-stylesheet and the icon are served; "/" redirects to /login and every API call
-except /api/login answers 401.
-
-Security, modelled on the tank hub:
-  * scrypt password hash, constant-time compare, passwords capped at 256 chars;
-  * per-IP back-off and lock-out of failed logins (the real client address is
-    taken from CF-Connecting-IP / X-Forwarded-For only when the request comes
-    from a local proxy such as cloudflared on loopback);
-  * session cookie HttpOnly, SameSite=Strict, Secure behind an HTTPS tunnel;
-    idle and absolute expiry; a new session on login (no fixation); all
-    sessions dropped on password change;
-  * CSRF: JSON body required and Origin must match the host;
-  * strict CSP (no inline scripts), X-Frame-Options, HSTS over HTTPS,
-    no-store for the API; socket timeout against slow clients.
+Accounts work exactly like on the tank hub (retencka):
+  * user accounts with a role: "admin" (settings, pairing, users, event history)
+    or "user" (read only: dashboard and charts, own password);
+  * first start: while no account exists the only way in is the name "admin"
+    with the setup code from the data directory (/var/lib/vitr/setup_code,
+    printed by the installer). It grants only a 15 min ticket for creating the
+    real administrator account; afterwards the code stops working;
+  * server-side sessions (only the SHA-256 of the cookie token is stored),
+    idle 7 days / absolute 30 days, all other sessions dropped on a password
+    change, a user's sessions dropped when deleted or given a new password;
+  * CSRF: per-session token in the X-CSRF-Token header + Origin check + JSON only;
+  * brute force: per-IP exponential back-off and a per-(name, IP) lock-out,
+    unknown names cost the same scrypt as known ones;
+  * the real client address is taken from CF-Connecting-IP / X-Forwarded-For
+    only from a local proxy (cloudflared on loopback); Secure cookie and HSTS
+    behind an HTTPS tunnel;
+  * strict CSP (no inline scripts), X-Frame-Options, no-store for the API;
+  * everything is written to the event history (audit), like the tank hub.
+Without a session only the login / setup pages and their assets are served.
 """
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import ipaddress
 import json
 import logging
 import mimetypes
-import os
 import secrets
 import threading
 import time
@@ -35,52 +36,31 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__
+from . import __version__, auth
 
 log = logging.getLogger("vitr.web")
 
-SESSION_IDLE_S = 7 * 86400
-SESSION_ABSOLUTE_S = 30 * 86400
-MAX_SESSIONS = 50
 COOKIE = "vitr_s"
+SETUP_COOKIE = "vitr_setup"
+SETUP_TICKET_S = 15 * 60
 MAX_BODY = 16 * 1024
-MAX_PASSWORD = 256
-MIN_PASSWORD = 10
 SOCKET_TIMEOUT_S = 20
 
-FREE_FAILS = 3                 # then exponential back-off per IP: 2, 4, 8 … s
-MAX_DELAY_S = 3600
-FAIL_FORGET_S = 3600
-
-PUBLIC_FILES = {"/login.html", "/js/login.js", "/js/theme.js", "/css/style.css", "/css/vitr.css",
+PUBLIC_FILES = {"/login.html", "/setup.html", "/js/login.js", "/js/theme.js", "/css/style.css",
                 "/favicon.svg"}
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; "
        "form-action 'self'; frame-ancestors 'none'")
 
-_DUMMY_HASH = None
-
-
-def hash_password(pw: str, salt: Optional[bytes] = None) -> str:
-    salt = salt or os.urandom(16)
-    h = hashlib.scrypt(pw.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
-    return salt.hex() + "$" + h.hex()
-
-
-def check_password(pw: str, stored: Optional[str]) -> bool:
-    """Constant-time check; with no stored hash it still costs one scrypt."""
-    global _DUMMY_HASH
-    pw = str(pw)[:MAX_PASSWORD]
-    if not stored:
-        _DUMMY_HASH = _DUMMY_HASH or hash_password(secrets.token_hex(8))
-        hash_password(pw, bytes.fromhex(_DUMMY_HASH.split("$", 1)[0]))
-        return False
-    try:
-        salt, _ = stored.split("$", 1)
-        return hmac.compare_digest(hash_password(pw, bytes.fromhex(salt)), stored)
-    except (ValueError, AttributeError):
-        return False
+AUDIT_CATEGORIES = {
+    "login": ["LOGIN_SUCCESS", "LOGIN_FAILED", "LOGOUT", "SETUP_LOGIN", "SETUP_FAILED", "PASSWORD_CHANGED"],
+    "users": ["USER_ADDED", "USER_DELETED", "USER_ROLE_CHANGED", "PASSWORD_CHANGED"],
+    "sensors": ["NODE_PAIRED", "NODE_PAIRING", "NODE_PAIRING_CANCELLED", "NODE_REMOVED",
+                "NODE_UNPAIR_REQUESTED", "NODE_UNPAIR_CANCELLED", "NODE_UNPAIRED", "CALIBRATION"],
+    "settings": ["SETTINGS_CHANGED", "CALIBRATION"],
+    "problems": ["LOGIN_FAILED", "SETUP_FAILED"],
+}
 
 
 def _is_loopback(addr: str) -> bool:
@@ -90,81 +70,71 @@ def _is_loopback(addr: str) -> bool:
         return False
 
 
-class LoginLimiter:
-    """Failed logins per client IP: a few free tries, then exponential back-off."""
+def ensure_setup_code(data_dir: Path) -> str:
+    """The first-login password (like the label password of the tank hub)."""
+    path = data_dir / "setup_code"
+    if not path.exists():
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        code = "".join(secrets.choice(alphabet) for _ in range(8))
+        path.write_text(code[:4] + "-" + code[4:] + "\n")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    return path.read_text().strip()
 
-    def __init__(self, clock=time.time):
-        self.clock = clock
-        self._d: dict[str, tuple[int, float, float]] = {}      # ip -> (fails, until, last)
-        self._lock = threading.Lock()
 
-    def retry_after(self, ip: str) -> int:
-        with self._lock:
-            _, until, _ = self._d.get(ip, (0, 0.0, 0.0))
-        return max(0, int(until - self.clock() + 0.999))
-
-    def fail(self, ip: str) -> None:
-        now = self.clock()
-        with self._lock:
-            if len(self._d) > 10000:
-                self._d = {k: v for k, v in self._d.items() if now - v[2] < FAIL_FORGET_S}
-            fails, _, last = self._d.get(ip, (0, 0.0, 0.0))
-            if now - last > FAIL_FORGET_S:
-                fails = 0
-            fails += 1
-            delay = 0 if fails <= FREE_FAILS else min(MAX_DELAY_S, 2 ** (fails - FREE_FAILS))
-            self._d[ip] = (fails, now + delay, now)
-
-    def success(self, ip: str) -> None:
-        with self._lock:
-            self._d.pop(ip, None)
+class HttpError(Exception):
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code = code
 
 
 class App:
-    def __init__(self, core, db, mqtt, static_dir: str, radio_ok: callable, clock=time.time):
+    def __init__(self, core, db, mqtt, static_dir: str, radio_ok: callable, data_dir: Optional[str] = None):
         self.core, self.db, self.mqtt = core, db, mqtt
         self.static = Path(static_dir).resolve()
+        self.data_dir = Path(data_dir or Path(db.path).parent)
         self.radio_ok = radio_ok
-        self.clock = clock
-        self.sessions: dict[str, tuple[float, float]] = {}    # token -> (created, last seen)
+        self.sessions = auth.Sessions(db)
+        self.login_locks = auth.LoginLocks()
+        self.ip_limiter = auth.IpLimiter()
+        self.setup_tickets: dict[str, float] = {}
+        self.setup_lock = threading.Lock()
         self.lock = threading.Lock()
-        self.limiter = LoginLimiter(clock)
 
-    # ------------------------------------------------------------ sessions
-    def new_session(self, old: Optional[str] = None) -> str:
-        tok = secrets.token_urlsafe(32)
-        now = self.clock()
+    # ------------------------------------------------------------ accounts
+    def no_users(self) -> bool:
+        return self.db.scalar("SELECT COUNT(*) FROM users", (), 0) == 0
+
+    def find_user(self, name: str) -> Optional[dict]:
+        key = auth.name_key(name)
+        if not key:
+            return None
+        return next((r for r in self.db.all("SELECT * FROM users") if auth.name_key(r["username"]) == key), None)
+
+    def setup_password(self) -> str:
+        try:
+            return (self.data_dir / "setup_code").read_text().strip()
+        except OSError:
+            return ""
+
+    def valid_ticket(self, tok: Optional[str]) -> bool:
         with self.lock:
-            self.sessions.pop(old or "", None)
-            self.sessions = {k: v for k, v in self.sessions.items() if self._alive(v, now)}
-            while len(self.sessions) >= MAX_SESSIONS:             # drop the oldest
-                self.sessions.pop(min(self.sessions, key=lambda k: self.sessions[k][1]))
-            self.sessions[tok] = (now, now)
+            exp = self.setup_tickets.get(tok or "")
+        return bool(tok) and exp is not None and exp > time.time()
+
+    def new_ticket(self) -> str:
+        tok = secrets.token_urlsafe(32)
+        now = time.time()
+        with self.lock:
+            self.setup_tickets = {k: v for k, v in self.setup_tickets.items() if v > now}
+            self.setup_tickets[tok] = now + SETUP_TICKET_S
         return tok
 
-    @staticmethod
-    def _alive(v: tuple[float, float], now: float) -> bool:
-        return now - v[0] < SESSION_ABSOLUTE_S and now - v[1] < SESSION_IDLE_S
-
-    def valid(self, tok: Optional[str]) -> bool:
-        if not tok:
-            return False
-        now = self.clock()
-        with self.lock:
-            v = self.sessions.get(tok)
-            if not v or not self._alive(v, now):
-                self.sessions.pop(tok, None)
-                return False
-            self.sessions[tok] = (v[0], now)
-            return True
-
-    def drop(self, tok: Optional[str]) -> None:
-        with self.lock:
-            self.sessions.pop(tok or "", None)
-
-    def drop_all_except(self, tok: Optional[str]) -> None:
-        with self.lock:
-            self.sessions = {k: v for k, v in self.sessions.items() if k == tok}
+    def last_admin(self, row: dict) -> bool:
+        return row["role"] == "admin" and self.db.scalar(
+            "SELECT COUNT(*) FROM users WHERE role='admin'", (), 0) <= 1
 
     # ---------------------------------------------------------------- data
     def mqtt_cfg(self, with_password: bool = False) -> dict:
@@ -193,6 +163,51 @@ class App:
             "mqtt": self.mqtt.status,
             "now": int(time.time()),
         }
+
+    def audit_page(self, q: dict) -> dict:
+        def arg(k, d=""):
+            return q.get(k, [d])[0]
+        try:
+            page = min(max(1, int(arg("page", "1"))), 1_000_000)
+        except ValueError:
+            page = 1
+        per = 50
+        where, args = [], []
+        cat = arg("category")
+        if cat in AUDIT_CATEGORIES:
+            acts = AUDIT_CATEGORIES[cat]
+            where.append(f"action IN ({','.join('?' * len(acts))})")
+            args += acts
+        who = arg("who")
+        if who == "people":
+            where.append("username NOT LIKE 'system%'")
+        elif who == "system":
+            where.append("username LIKE 'system%'")
+        elif who:
+            where.append("username = ? COLLATE NOCASE")
+            args.append(who[:64])
+        text = arg("q").strip()[:100]
+        if text:
+            where.append("(detail LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\' OR ip LIKE ? ESCAPE '\\')")
+            like = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            args += [like, like, like]
+        for key, op in (("from", ">="), ("to", "<")):
+            try:
+                v = int(arg(key))
+                if -2 ** 62 < v < 2 ** 62:
+                    where.append(f"ts {op} ?")
+                    args.append(v)
+            except ValueError:
+                pass
+        w = ("WHERE " + " AND ".join(where)) if where else ""
+        total = self.db.scalar(f"SELECT COUNT(*) FROM audit {w}", tuple(args), 0)
+        rows = self.db.all(f"SELECT ts, username, ip, action, detail FROM audit {w} "
+                           "ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?", tuple(args + [per, (page - 1) * per]))
+        users = [r["username"] for r in self.db.all(
+            "SELECT DISTINCT username FROM audit WHERE username NOT LIKE 'system%' "
+            "AND username != '' ORDER BY username COLLATE NOCASE LIMIT 50")]
+        return {"logs": rows, "total": total, "page": page,
+                "total_pages": max(1, (total + per - 1) // per), "users": users}
 
 
 def make_handler(app: App):
@@ -224,22 +239,23 @@ def make_handler(app: App):
             return self._from_proxy() and (
                 self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https")
 
-        def _cookie(self) -> Optional[str]:
+        def _cookie(self, name: str = COOKIE) -> Optional[str]:
             for part in (self.headers.get("Cookie") or "").split(";"):
                 k, _, v = part.strip().partition("=")
-                if k == COOKIE:
+                if k == name:
                     return v
             return None
 
-        def _authed(self) -> bool:
-            return app.valid(self._cookie())
+        def _session(self) -> Optional[dict]:
+            if not hasattr(self, "_sess"):
+                self._sess = app.sessions.lookup(self._cookie())
+            return self._sess
 
-        def _set_cookie(self, tok: str, max_age: int) -> str:
+        def _cookie_hdr(self, name: str, tok: str, max_age: int) -> str:
             secure = "; Secure" if self._https() else ""
-            return f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
+            return f"{name}={tok}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
 
-        def _send(self, code: int, body: bytes, ctype: str, headers: Optional[dict] = None,
-                  cache: str = "no-store") -> None:
+        def _send(self, code: int, body: bytes, ctype: str, headers=None, cache: str = "no-store") -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -254,18 +270,18 @@ def make_handler(app: App):
             self.send_header("X-Robots-Tag", "noindex, nofollow")
             if self._https():
                 self.send_header("Strict-Transport-Security", "max-age=31536000")
-            for k, v in (headers or {}).items():
+            for k, v in (headers.items() if isinstance(headers, dict) else (headers or [])):
                 self.send_header(k, v)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def _json(self, obj, code: int = 200, headers: Optional[dict] = None) -> None:
+        def _json(self, obj, code: int = 200, headers=None) -> None:
             self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8", headers)
 
-        def _err(self, code: int, msg: str, headers: Optional[dict] = None) -> None:
-            self._json({"error": msg}, code, headers)
+        def _err(self, code: int, msg: str, headers=None) -> None:
+            self._json({"ok": False, "error": msg}, code, headers)
 
         def _redirect(self, to: str) -> None:
             self._send(302, b"", "text/plain; charset=utf-8", {"Location": to})
@@ -290,53 +306,91 @@ def make_handler(app: App):
         def _same_origin(self) -> bool:
             origin = self.headers.get("Origin")
             if not origin:
-                return True                     # same-origin fetch of old browsers / curl
+                return True
             host = origin.split("://", 1)[-1].rstrip("/").lower()
             allowed = {(self.headers.get("Host") or "").lower()}
             if self._from_proxy() and self.headers.get("X-Forwarded-Host"):
                 allowed.add(self.headers["X-Forwarded-Host"].split(",")[0].strip().lower())
             return host in allowed
 
+        def _need(self, role: Optional[str] = None) -> dict:
+            s = self._session()
+            if not s:
+                raise HttpError(401, "Nejste přihlášen")
+            if role == "admin" and s["role"] != "admin":
+                raise HttpError(403, "Nedostatečná oprávnění")
+            return s
+
+        def _limited(self, ip: str) -> bool:
+            wait = app.ip_limiter.retry_after(ip)
+            if wait:
+                self._err(429, f"Příliš mnoho pokusů. Zkuste to za {wait} s.", {"Retry-After": str(wait)})
+                return True
+            return False
+
         # ---------------------------------------------------------- GET
         def do_HEAD(self):
             self.do_GET()
 
         def do_GET(self):
+            self.__dict__.pop("_sess", None)    # keep-alive: one handler serves many requests
             u = urlparse(self.path)
             p = u.path
             try:
                 if p.startswith("/api/"):
-                    if not self._authed():
-                        return self._err(401, "Přihlaste se")
-                    if p == "/api/state":
-                        return self._json(app.overview())
-                    if p == "/api/me":
-                        return self._json({"admin": True})
-                    if p == "/api/history":
-                        q = parse_qs(u.query)
-                        nid = int(q["id"][0])
-                        to = int(q.get("to", [time.time()])[0])
-                        frm = int(q.get("from", [to - 86400])[0])
-                        return self._json(app.core.history(nid, frm, to))
-                    if p == "/api/mqtt":
-                        return self._json(app.mqtt_cfg())
-                    return self._err(404, "Nenalezeno")
+                    return self._api_get(p, parse_qs(u.query))
                 if p in ("/login", "/login.html"):
-                    if self._authed():
+                    if self._session():
                         return self._redirect("/")
+                    if app.no_users() and app.valid_ticket(self._cookie(SETUP_COOKIE)):
+                        return self._redirect("/setup")
                     return self._static("/login.html")
+                if p in ("/setup", "/setup.html"):
+                    if not app.no_users() or not app.valid_ticket(self._cookie(SETUP_COOKIE)):
+                        return self._redirect("/login")
+                    return self._static("/setup.html")
                 if p in ("", "/", "/index.html"):
-                    if not self._authed():
+                    if not self._session():
                         return self._redirect("/login")
                     return self._static("/index.html")
-                if p in PUBLIC_FILES or self._authed():
+                if p in PUBLIC_FILES or self._session():
                     return self._static(p)
                 return self._err(404, "Nenalezeno")
+            except HttpError as e:
+                return self._err(e.code, str(e))
             except (KeyError, ValueError, IndexError):
                 return self._err(400, "Špatný požadavek")
             except Exception:
                 log.exception("GET %s", p)
                 return self._err(500, "Chyba serveru")
+
+        def _api_get(self, p: str, q: dict) -> None:
+            if p == "/api/auth/mode":
+                return self._json({"first_login": app.no_users()})
+            if p == "/api/me":
+                s = self._need()
+                return self._json({"username": s["username"], "role": s["role"], "csrf": s["csrf"],
+                                   "version": __version__})
+            if p == "/api/state":
+                self._need()
+                return self._json(app.overview())
+            if p == "/api/history":
+                self._need()
+                nid = int(q["id"][0])
+                to = int(q.get("to", [time.time()])[0])
+                frm = int(q.get("from", [to - 86400])[0])
+                return self._json(app.core.history(nid, frm, to))
+            if p == "/api/mqtt":
+                self._need("admin")
+                return self._json(app.mqtt_cfg())
+            if p == "/api/users":
+                self._need("admin")
+                return self._json(app.db.all(
+                    "SELECT username, role, created, last_login FROM users ORDER BY username COLLATE NOCASE"))
+            if p == "/api/audit":
+                self._need("admin")
+                return self._json(app.audit_page(q))
+            raise HttpError(404, "Nenalezeno")
 
         def _static(self, p: str) -> None:
             f = (app.static / p.lstrip("/")).resolve()
@@ -350,21 +404,35 @@ def make_handler(app: App):
 
         # --------------------------------------------------------- POST
         def do_POST(self):
+            self.__dict__.pop("_sess", None)
             p = urlparse(self.path).path
             body = self._body()
             if body is None:
                 return self._err(400, "Špatný požadavek")
             if not self._same_origin():
                 return self._err(403, "Neplatný původ požadavku")
+            sess = self._session()
+            if sess and p not in ("/api/auth/login", "/api/auth/setup"):
+                sent = self.headers.get("X-CSRF-Token", "")
+                if not hmac.compare_digest(sent.encode("utf-8"), sess["csrf"].encode("utf-8")):
+                    return self._err(403, "Neplatný CSRF token – obnovte stránku")
             try:
-                if p == "/api/login":
+                if p == "/api/auth/login":
                     return self._login(body)
-                if p == "/api/logout":
-                    app.drop(self._cookie())
-                    return self._json({"ok": True}, headers={"Set-Cookie": self._set_cookie("", 0)})
-                if not self._authed():
-                    return self._err(401, "Přihlaste se")
-                return self._admin(p, body)
+                if p == "/api/auth/setup":
+                    return self._setup(body)
+                if p == "/api/auth/logout":
+                    if sess:
+                        app.core.audit("LOGOUT", "Odhlášení", sess["username"], self._ip())
+                    app.sessions.delete(self._cookie())
+                    return self._json({"ok": True}, headers={"Set-Cookie": self._cookie_hdr(COOKIE, "", 0)})
+                if p == "/api/me/password":
+                    return self._my_password(self._need(), body)
+                if p.startswith("/api/users/"):
+                    return self._users(p, self._need("admin"), body)
+                return self._admin(p, self._need("admin"), body)
+            except HttpError as e:
+                return self._err(e.code, str(e))
             except ValueError as e:
                 return self._err(400, str(e))
             except (KeyError, TypeError):
@@ -373,33 +441,169 @@ def make_handler(app: App):
                 log.exception("POST %s", p)
                 return self._err(500, "Chyba serveru")
 
-        def _login(self, body: dict) -> None:
+        # ------------------------------------------------------ accounts
+        def _login(self, b: dict) -> None:
             ip = self._ip()
-            wait = app.limiter.retry_after(ip)
-            if wait:
-                return self._err(429, f"Příliš mnoho pokusů. Zkuste to za {wait} s.",
-                                 {"Retry-After": str(wait)})
-            if check_password(str(body.get("password", "")), app.db.get("password")):
-                app.limiter.success(ip)
-                tok = app.new_session(self._cookie())
-                log.info("login ok from %s", ip)
-                return self._json({"ok": True},
-                                  headers={"Set-Cookie": self._set_cookie(tok, SESSION_ABSOLUTE_S)})
-            app.limiter.fail(ip)
-            log.warning("login failed from %s", ip)
-            time.sleep(0.5 + secrets.randbelow(500) / 1000)
-            return self._err(401, "Špatné heslo")
+            if self._limited(ip):
+                return
+            username = str(b.get("username", ""))[:64].strip()
+            password = str(b.get("password", ""))[:256]
+            if app.no_users():
+                expected = app.setup_password()
+                ok = (username.lower() == "admin" and bool(expected)
+                      and hmac.compare_digest(password.strip().encode(), expected.encode()))
+                if not ok:
+                    app.ip_limiter.fail(ip)
+                    app.core.audit("SETUP_FAILED", "Neplatné výchozí přihlášení", username or "-", ip)
+                    time.sleep(0.5 + secrets.randbelow(500) / 1000)
+                    return self._err(401, "Neplatné jméno nebo heslo. Při prvním přihlášení použijte jméno "
+                                          "admin a kód z instalace (sudo cat /var/lib/vitr/setup_code).")
+                app.ip_limiter.success(ip)
+                app.core.audit("SETUP_LOGIN", "První přihlášení výchozím účtem – vytváření vlastního účtu",
+                               "admin", ip)
+                return self._json({"ok": True, "setup": True}, headers={
+                    "Set-Cookie": self._cookie_hdr(SETUP_COOKIE, app.new_ticket(), SETUP_TICKET_S)})
 
-        def _admin(self, p: str, b: dict) -> None:
-            core = app.core
+            row = app.find_user(username)
+            # locked (name, IP): verify against nothing (same cost), answer like a wrong password
+            locked = app.login_locks.locked(username, ip)
+            ok = auth.verify_password(password, row["pw_hash"] if row and not locked else None)
+            if not ok or locked:
+                app.ip_limiter.fail(ip)
+                if not locked:
+                    app.login_locks.fail(username, ip)
+                app.core.audit("LOGIN_FAILED", "Neplatné jméno nebo heslo", username or "(prázdné)", ip)
+                time.sleep(0.5 + secrets.randbelow(500) / 1000)
+                return self._err(401, "Neplatné jméno nebo heslo.")
+            app.ip_limiter.success(ip)
+            app.login_locks.success(username, ip)
+            app.db.execute("UPDATE users SET last_login=? WHERE username=?", (int(time.time()), row["username"]))
+            app.sessions.delete(self._cookie())                 # no session fixation
+            app.sessions.purge()
+            token, _ = app.sessions.create(row["username"], ip, self.headers.get("User-Agent", ""))
+            app.core.audit("LOGIN_SUCCESS", "Přihlášení", row["username"], ip)
+            return self._json({"ok": True},
+                              headers={"Set-Cookie": self._cookie_hdr(COOKIE, token, auth.SESSION_ABSOLUTE_S)})
+
+        def _setup(self, b: dict) -> None:
+            """Create the first own administrator account (needs the setup ticket)."""
+            ip = self._ip()
+            if not app.no_users():
+                return self._err(409, "Systém už je nastaven.")
+            if not app.valid_ticket(self._cookie(SETUP_COOKIE)):
+                return self._err(403, "Platnost prvního přihlášení vypršela – přihlaste se znovu kódem z instalace.")
+            username = auth.clean_username(str(b.get("username", "")))
+            password = str(b.get("password", ""))
+            if username.lower() == "admin":
+                return self._err(400, "Zvolte si vlastní jméno – výchozí účet „admin“ bude zrušen.")
+            problem = auth.username_problem(username) or auth.password_problem(username, password)
+            if problem:
+                return self._err(400, problem)
+            if hmac.compare_digest(password.encode(), app.setup_password().encode()):
+                return self._err(400, "Nové heslo nesmí být stejné jako kód z instalace.")
+            pw_hash = auth.hash_password(password)
+            with app.setup_lock:
+                if not app.no_users():
+                    return self._err(409, "Systém už je nastaven.")
+                now = int(time.time())
+                app.db.execute("INSERT INTO users(username, pw_hash, role, created, pw_changed) VALUES(?,?,?,?,?)",
+                               (username, pw_hash, "admin", now, now))
+                with app.lock:
+                    app.setup_tickets.clear()
+            app.core.audit("USER_ADDED", f"Vytvořen administrátor {username!r}; výchozí účet admin zrušen",
+                           username, ip)
+            token, _ = app.sessions.create(username, ip, self.headers.get("User-Agent", ""))
+            # one Set-Cookie only (some proxies fold several into one header); the setup
+            # ticket is already void on the server and its cookie expires on its own
+            return self._json({"ok": True},
+                              headers={"Set-Cookie": self._cookie_hdr(COOKIE, token, auth.SESSION_ABSOLUTE_S)})
+
+        def _my_password(self, s: dict, b: dict) -> None:
+            ip = self._ip()
+            if self._limited(ip):
+                return
+            old, new = str(b.get("old_password", ""))[:256], str(b.get("new_password", ""))
+            row = app.db.one("SELECT pw_hash FROM users WHERE username=?", (s["username"],))
+            if not row or not auth.verify_password(old, row["pw_hash"]):
+                app.ip_limiter.fail(ip)
+                return self._err(400, "Současné heslo není správné.")
+            problem = auth.password_problem(s["username"], new)
+            if problem:
+                return self._err(400, problem)
+            app.db.execute("UPDATE users SET pw_hash=?, pw_changed=? WHERE username=?",
+                           (auth.hash_password(new), int(time.time()), s["username"]))
+            app.sessions.delete_user_sessions(s["username"], except_hash=s["id_hash"])
+            app.core.audit("PASSWORD_CHANGED", "Změna vlastního hesla (ostatní relace odhlášeny)",
+                           s["username"], ip)
+            return self._json({"ok": True})
+
+        def _users(self, p: str, s: dict, b: dict) -> None:
+            me, ip = s["username"], self._ip()
+            if p == "/api/users/add":
+                username = auth.clean_username(str(b.get("username", "")))
+                password = str(b.get("password", ""))
+                role = b.get("role", "user")
+                if role not in ("user", "admin"):
+                    return self._err(400, "Neplatná role.")
+                problem = auth.username_problem(username) or auth.password_problem(username, password)
+                if problem:
+                    return self._err(400, problem)
+                if username.lower() == "admin" or app.find_user(username):
+                    return self._err(400, "Uživatel již existuje (velikost písmen se nerozlišuje).")
+                now = int(time.time())
+                app.db.execute("INSERT INTO users(username, pw_hash, role, created, pw_changed) VALUES(?,?,?,?,?)",
+                               (username, auth.hash_password(password), role, now, now))
+                app.core.audit("USER_ADDED", f"Přidán uživatel {username!r} ({role})", me, ip)
+                return self._json({"ok": True})
+
+            row = app.find_user(str(b.get("username", "")))
+            if not row:
+                return self._err(404, "Uživatel nenalezen")
+            if auth.name_key(row["username"]) == auth.name_key(me):
+                return self._err(400, "Tuto akci nelze provést na vlastním účtu.")
+            if p == "/api/users/role":
+                role = b.get("role")
+                if role not in ("user", "admin"):
+                    return self._err(400, "Neplatná role.")
+                if role != "admin" and app.last_admin(row):
+                    return self._err(400, "Musí zůstat alespoň jeden administrátor.")
+                app.db.execute("UPDATE users SET role=? WHERE username=?", (role, row["username"]))
+                app.core.audit("USER_ROLE_CHANGED", f"{row['username']!r}: {row['role']} → {role}", me, ip)
+                return self._json({"ok": True})
+            if p == "/api/users/delete":
+                if app.last_admin(row):
+                    return self._err(400, "Musí zůstat alespoň jeden administrátor.")
+                app.db.execute("DELETE FROM users WHERE username=?", (row["username"],))
+                app.sessions.delete_user_sessions(row["username"])
+                app.core.audit("USER_DELETED", f"Smazán uživatel {row['username']!r}", me, ip)
+                return self._json({"ok": True})
+            if p == "/api/users/password":
+                password = str(b.get("password", ""))
+                problem = auth.password_problem(row["username"], password)
+                if problem:
+                    return self._err(400, problem)
+                app.db.execute("UPDATE users SET pw_hash=?, pw_changed=? WHERE username=?",
+                               (auth.hash_password(password), int(time.time()), row["username"]))
+                app.sessions.delete_user_sessions(row["username"])
+                app.core.audit("PASSWORD_CHANGED",
+                               f"Administrátor nastavil nové heslo uživateli {row['username']!r}", me, ip)
+                return self._json({"ok": True})
+            return self._err(404, "Nenalezeno")
+
+        # --------------------------------------------------- admin actions
+        def _admin(self, p: str, s: dict, b: dict) -> None:
+            core, me, ip = app.core, s["username"], self._ip()
             if p == "/api/pair/start":
                 core.start_pairing()
+                core.audit("NODE_PAIRING", "Čekání na nové čidlo (10 min)", me, ip)
                 return self._json({"ok": True, "left": core.pairing_left()})
             if p == "/api/pair/stop":
                 core.stop_pairing()
+                core.audit("NODE_PAIRING_CANCELLED", "Čekání na nové čidlo ukončeno", me, ip)
                 return self._json({"ok": True})
             if p == "/api/node/update":
                 nid = int(b["id"])
+                old = core.node(nid)
                 rev = b.get("rev_value")
                 rev_ms = None
                 if rev not in (None, ""):
@@ -407,17 +611,34 @@ def make_handler(app: App):
                 ppr = b.get("ppr")
                 core.update_node(nid, name=b.get("name"), rev_ms=rev_ms,
                                  ppr=None if ppr in (None, "") else int(ppr))
+                new = core.node(nid)
+                if old and new:
+                    changes = []
+                    if old["name"] != new["name"]:
+                        changes.append(f"název {old['name']!r} → {new['name']!r}")
+                    if abs(old["rev_ms"] - new["rev_ms"]) > 1e-9 or old["ppr"] != new["ppr"]:
+                        changes.append(f"1 ot/s = {old['rev_ms']:g} → {new['rev_ms']:g} m/s, "
+                                       f"pulzů/ot {old['ppr']} → {new['ppr']}")
+                    if changes:
+                        core.audit("CALIBRATION", f"{core.label(nid)}: " + "; ".join(changes), me, ip)
                 app.mqtt.notify(nid)
                 return self._json({"ok": True})
             if p == "/api/node/unpair":
-                core.request_unpair(int(b["id"]), bool(b.get("on", True)))
+                nid, on = int(b["id"]), bool(b.get("on", True))
+                core.request_unpair(nid, on)
+                core.audit("NODE_UNPAIR_REQUESTED" if on else "NODE_UNPAIR_CANCELLED",
+                           f"{core.label(nid)}: " + ("čeká na vložení baterie" if on else "odpárování zrušeno"),
+                           me, ip)
                 return self._json({"ok": True})
             if p == "/api/node/forget":
                 nid = int(b["id"])
+                label = core.label(nid)
                 core.forget(nid)
                 if b.get("history"):
                     core.delete_history(nid)
                 app.mqtt.remove_node(f"{nid:04X}")
+                core.audit("NODE_REMOVED", f"Odebráno čidlo {label}" + (" i s daty" if b.get("history") else ""),
+                           me, ip)
                 return self._json({"ok": True})
             if p == "/api/mqtt":
                 cfg = app.mqtt_cfg(with_password=True)
@@ -435,30 +656,8 @@ def make_handler(app: App):
                     cfg["password"] = ""
                 app.db.set("mqtt", json.dumps(cfg))
                 app.mqtt.reconfigure()
-                return self._json({"ok": True})
-            if p == "/api/password":
-                ip = self._ip()
-                wait = app.limiter.retry_after(ip)
-                if wait:
-                    return self._err(429, f"Příliš mnoho pokusů. Zkuste to za {wait} s.",
-                                     {"Retry-After": str(wait)})
-                if not check_password(str(b.get("old", "")), app.db.get("password")):
-                    app.limiter.fail(ip)
-                    return self._err(403, "Současné heslo nesouhlasí")
-                new = str(b.get("new", ""))
-                if len(new) < MIN_PASSWORD:
-                    return self._err(400, f"Nové heslo musí mít aspoň {MIN_PASSWORD} znaků")
-                if len(new) > MAX_PASSWORD:
-                    return self._err(400, f"Nové heslo může mít nejvýš {MAX_PASSWORD} znaků")
-                app.db.set("password", hash_password(new))
-                app.drop_all_except(self._cookie())        # other devices must log in again
-                pw_file = Path(app.db.path).parent / "heslo.txt"
-                if pw_file.exists():
-                    try:
-                        pw_file.unlink()                   # the initial password is no longer valid
-                    except OSError:
-                        pass
-                log.info("password changed from %s", ip)
+                core.audit("SETTINGS_CHANGED", "Home Assistant (MQTT): " +
+                           (f"zapnuto, {cfg['host']}:{cfg['port']}" if cfg["enabled"] else "vypnuto"), me, ip)
                 return self._json({"ok": True})
             return self._err(404, "Nenalezeno")
 

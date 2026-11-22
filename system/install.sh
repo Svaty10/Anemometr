@@ -52,6 +52,11 @@ fi
 PORT=$(sed -n 's/^VITR_WEB_PORT=\([0-9]*\)/\1/p' /etc/default/vitr); PORT=${PORT:-8080}
 echo
 echo "Web: http://$(hostname).local:$PORT"
-if [ -f /var/lib/vitr/heslo.txt ]; then
-    echo "$(cat /var/lib/vitr/heslo.txt)   (po změně hesla na webu se soubor smaže sám)"
+IP=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$IP" ] && echo "     http://$IP:$PORT"
+USERS=$(python3 -c "import sqlite3; print(sqlite3.connect('file:/var/lib/vitr/vitr.db?mode=ro', uri=True).execute('SELECT COUNT(*) FROM users').fetchone()[0])" 2>/dev/null || echo 0)
+if [ "$USERS" = "0" ] && [ -f /var/lib/vitr/setup_code ]; then
+    echo
+    echo "První přihlášení: jméno  admin  a kód  $(cat /var/lib/vitr/setup_code)"
+    echo "Pak si vytvoříte vlastní účet administrátora a výchozí přístup se zruší."
+    echo "(Kód kdykoli znovu: sudo cat /var/lib/vitr/setup_code)"
 fi

@@ -23,7 +23,7 @@ from . import __version__
 from .core import Core
 from .db import Database
 from .mqtt import Mqtt
-from .web import App, hash_password, start_web
+from .web import App, ensure_setup_code, start_web
 
 log = logging.getLogger("vitr")
 
@@ -55,13 +55,10 @@ class BridgeProtocol(asyncio.DatagramProtocol):
 def first_start(db: Database, data_dir: Path) -> None:
     if not db.get("uid"):
         db.set("uid", secrets.token_hex(3))
-    if not db.get("password"):
-        pw = "-".join(secrets.token_hex(2) for _ in range(5))      # 80 bits
-        db.set("password", hash_password(pw))
-        f = data_dir / "heslo.txt"
-        f.write_text(f"Heslo pro nastavení webu anemometru: {pw}\n", encoding="utf-8")
-        os.chmod(f, 0o600)
-        log.warning("Initial web password written to %s", f)
+    ensure_setup_code(data_dir)                       # first login: admin + this code
+    old = data_dir / "heslo.txt"                      # single password of 1.0 (pre-accounts)
+    if old.exists():
+        old.unlink()
 
 
 async def main() -> None:
@@ -91,7 +88,7 @@ async def main() -> None:
     def bridge_ok() -> bool:
         return time.time() - core.stats["last_frame"] < 1800
 
-    app = App(core, db, mqtt, static_dir, bridge_ok)
+    app = App(core, db, mqtt, static_dir, bridge_ok, str(data_dir))
     web = start_web(app, env("VITR_BIND", "0.0.0.0"), int(env("VITR_WEB_PORT", "8080")))
 
     stop = asyncio.Event()

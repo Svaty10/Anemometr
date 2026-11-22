@@ -61,7 +61,7 @@ pakety anemometru ignoruje a anemometr nikdy nepřijme párování od retenčky.
   `127.0.0.1` (UDP) službě **vitr** a pošle do rádia, co jí vitr vrátí (PAIR_ACK/UNPAIR musí
   odejít do 0,6 s – lokální UDP stačí).
 - **vitr** – samostatná služba (Python, jen stdlib jako retenčka): párování X25519, dešifrování,
-  SQLite, web na **:8080** celý za heslem (scrypt, omezení pokusů, CSP, CSRF ochrana), MQTT Discovery do stejného Mosquitta (v HA se objeví zařízení
+  SQLite, web na **:8080** s uživatelskými účty jako retenčka (role, relace, CSRF, omezení pokusů, audit), MQTT Discovery do stejného Mosquitta (v HA se objeví zařízení
   „Anemometr 1/2“ – žádný další port pro HA).
 - Rychlost = `otáčky/s × kalibrace`, otáčky/s = `pulses / window_s / pulzů na otáčku`; kalibrace se zadává na webu jako „1 otáčka za sekundu = X m/s“ (výchozí 0,667 m/s = 2,4 km/h);
   hub opraví nepřesnost RC hodin čidla (±3 %) podle skutečných časů příjmu paketů.
@@ -75,8 +75,10 @@ Na Raspberry Pi s retenčkou (s mostem z větve `anemometr-most`), podrobně v
 git clone https://github.com/Svaty10/Anemometr.git ~/Anemometr && cd ~/Anemometr && sudo bash system/install.sh
 ```
 
-Web anemometrů pak běží na `http://<pi>:8080` (retenčka dál na portu 80). **Celý web je za
-heslem** (i prohlížení), takže ho lze vystavit přes Cloudflare Tunnel – viz
+Web anemometrů pak běží na `http://<pi>:8080` (retenčka dál na portu 80). **Uživatelské účty
+jako u retenčky**: první přihlášení `admin` + kód z instalace → vlastní účet administrátora,
+další uživatelé s rolí administrátor / uživatel (jen čtení), historie událostí. Bez přihlášení
+web neukáže nic, takže ho lze vystavit přes Cloudflare Tunnel – viz
 [docs/instalace.md](docs/instalace.md#5-přístup-zvenku-přes-cloudflare-tunnel).
 
 ## Licence
