@@ -3,6 +3,11 @@
 Formát dle [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), verze dle [SemVer](https://semver.org/).
 Postup vydání nové verze: [docs/vydani.md](docs/vydani.md).
 
+## [Unreleased]
+
+### Přidáno
+- **Logo vlevo nahoře vrací na přehled:** klik na ikonu větru s názvem otevře záložku *Přehled* z kterékoli jiné záložky (stejně jako v retenčce).
+
 ## [1.2.1] - 2026-11-22
 
 ### Přidáno
