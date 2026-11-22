@@ -75,11 +75,19 @@ journalctl -u vitr -f          # log
 
 1. Nahrát firmware do čidla: `uzel/2-novy-cip.cmd` (nový čip) nebo `uzel/3-aktualizace-firmwaru.cmd`
    – použije přeložený `uzel/build/firmware.hex`.
-2. Web `http://retencka.local:8080` → přihlásit (administrátor) → **Nastavení** → **Čekat na nové čidlo**.
-3. Vložit do anemometru baterii. Do minuty se objeví jako „Anemometr 1“; přejmenovat a
-   nastavit kalibraci „1 otáčka za sekundu = X m/s“ podle popisu anemometru a počet pulzů na
-   otáčku (výchozí 0,667 m/s = 2,4 km/h a 1 pulz).
-4. Druhý anemometr stejně.
+2. Web `http://retencka.local:8080` → přihlásit (administrátor) → **Nastavení** → **Čidla** →
+   **Přidat čidlo…** (stejně jako u retenčky).
+3. Vložit do anemometru baterii. V dialogu se objeví v tabulce *Nová čidla v dosahu* – kliknout
+   **Spárovat**, ověřit ID podle štítku a zadat název (ID se dá zadat i předem). Kroky v dialogu
+   ukazují postup: vložte baterii → potvrďte ID → první data → hotovo. Čidlo se nikdy nespáruje
+   samo, jen po potvrzení jeho ID.
+4. U čidla (Nastavení → karta anemometru) nastavit kalibraci „1 otáčka za sekundu = X m/s“ podle
+   popisu anemometru a počet pulzů na otáčku (výchozí 0,667 m/s = 2,4 km/h a 1 pulz).
+5. **Odpárování:** v tabulce čidel **Odpárovat** a pak do anemometru vyjmout a vložit baterii –
+   dokončí se, až to čidlo potvrdí. Ztracené čidlo: **Odebrat bez čidla**; hub si jeho klíč
+   uschová, a když se najde, stačí u něj v *Čidla v dosahu* (pokročilá nastavení) kliknout
+   **Spárovat znovu**. Naměřená data zůstávají.
+6. Druhý anemometr stejně.
 
 ## 4. Home Assistant
 

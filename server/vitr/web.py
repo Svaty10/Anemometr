@@ -37,6 +37,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__, auth
+from .core import MAX_NODES
 
 log = logging.getLogger("vitr.web")
 
@@ -82,6 +83,13 @@ def ensure_setup_code(data_dir: Path) -> str:
         except OSError:
             pass
     return path.read_text().strip()
+
+
+def parse_node_id(raw) -> int:
+    txt = str(raw or "").strip().upper().replace("0X", "")
+    if not txt or len(txt) > 4 or any(c not in "0123456789ABCDEF" for c in txt):
+        raise ValueError("ID čidla jsou 4 znaky 0–9/A–F (např. 3F2A).")
+    return int(txt, 16)
 
 
 class HttpError(Exception):
@@ -157,12 +165,16 @@ class App:
         return {
             "version": __version__,
             "nodes": self.core.states(),
-            "pairing_left": self.core.pairing_left(),
-            "heard": self.core.heard_unknown(),
             "radio": {**self.core.stats, "bridge_ok": self.radio_ok()},
             "mqtt": self.mqtt.status,
             "now": int(time.time()),
         }
+
+    def nodes_page(self) -> dict:
+        """Settings → Čidla: sensors, pairing, sensors in range (same shape as the tank hub)."""
+        pairing = self.core.pairing_status()
+        return {"nodes": self.core.states(), "heard": self.core.heard_list(), "pairing": pairing,
+                "radio": {**self.core.stats, "bridge_ok": self.radio_ok()}}
 
     def audit_page(self, q: dict) -> dict:
         def arg(k, d=""):
@@ -374,6 +386,9 @@ def make_handler(app: App):
             if p == "/api/state":
                 self._need()
                 return self._json(app.overview())
+            if p == "/api/nodes":
+                self._need("admin")
+                return self._json(app.nodes_page())
             if p == "/api/history":
                 self._need()
                 nid = int(q["id"][0])
@@ -593,13 +608,44 @@ def make_handler(app: App):
         # --------------------------------------------------- admin actions
         def _admin(self, p: str, s: dict, b: dict) -> None:
             core, me, ip = app.core, s["username"], self._ip()
-            if p == "/api/pair/start":
-                core.start_pairing()
-                core.audit("NODE_PAIRING", "Čekání na nové čidlo (10 min)", me, ip)
-                return self._json({"ok": True, "left": core.pairing_left()})
-            if p == "/api/pair/stop":
-                core.stop_pairing()
-                core.audit("NODE_PAIRING_CANCELLED", "Čekání na nové čidlo ukončeno", me, ip)
+            if p == "/api/pairing/start":
+                nid = parse_node_id(b.get("node_id"))
+                if core.node(nid) is None and len(core.nodes()) >= MAX_NODES:
+                    return self._err(400, f"Maximálně {MAX_NODES} anemometrů.")
+                name = str(b.get("name") or "").strip()[:40]
+                if core.node(nid) is None and not name:
+                    name = core.archive_info(nid)["archived_name"]     # re-paired removed sensor
+                    if not name:
+                        return self._err(400, "Zadejte název čidla.")
+                core.start_pairing(nid, name, me)
+                core.audit("NODE_PAIRING", f"Čeká se na párování čidla {name} ({nid:04X})" if name
+                           else f"Čeká se na párování čidla {core.label(nid)}", me, ip)
+                return self._json({"ok": True, "pairing": core.pairing_status()})
+            if p == "/api/pairing/cancel":
+                nid = parse_node_id(b.get("node_id"))
+                waiting = nid in core.pair_targets
+                core.cancel_pairing(nid)
+                if waiting:
+                    core.audit("NODE_PAIRING_CANCELLED", f"Zrušeno čekání na párování čidla {core.label(nid)}", me, ip)
+                return self._json({"ok": True, "pairing": core.pairing_status()})
+            if p == "/api/nodes/remove":
+                # default two-step (the sensor confirms after a battery re-insertion);
+                # force: a lost or broken sensor, its key is archived for a later re-pairing
+                nid = parse_node_id(b.get("node_id"))
+                node = core.node(nid)
+                if not node:
+                    return self._err(404, "Čidlo neexistuje.")
+                if b.get("force") or not node["k_mac"]:
+                    core.forget_node(nid, "NODE_REMOVED", f"Odebráno čidlo {core.label(nid)} bez potvrzení čidlem", me, ip)
+                    return self._json({"ok": True, "removed": True})
+                core.request_unpair(nid, me, ip)
+                return self._json({"ok": True, "removed": False})
+            if p == "/api/nodes/unpair/cancel":
+                nid = parse_node_id(b.get("node_id"))
+                node = core.node(nid)
+                if not node or not node["unpair"]:
+                    return self._err(404, "Čidlo nečeká na odpárování.")
+                core.cancel_unpair(nid, me, ip)
                 return self._json({"ok": True})
             if p == "/api/node/update":
                 nid = int(b["id"])
@@ -622,23 +668,6 @@ def make_handler(app: App):
                     if changes:
                         core.audit("CALIBRATION", f"{core.label(nid)}: " + "; ".join(changes), me, ip)
                 app.mqtt.notify(nid)
-                return self._json({"ok": True})
-            if p == "/api/node/unpair":
-                nid, on = int(b["id"]), bool(b.get("on", True))
-                core.request_unpair(nid, on)
-                core.audit("NODE_UNPAIR_REQUESTED" if on else "NODE_UNPAIR_CANCELLED",
-                           f"{core.label(nid)}: " + ("čeká na vložení baterie" if on else "odpárování zrušeno"),
-                           me, ip)
-                return self._json({"ok": True})
-            if p == "/api/node/forget":
-                nid = int(b["id"])
-                label = core.label(nid)
-                core.forget(nid)
-                if b.get("history"):
-                    core.delete_history(nid)
-                app.mqtt.remove_node(f"{nid:04X}")
-                core.audit("NODE_REMOVED", f"Odebráno čidlo {label}" + (" i s daty" if b.get("history") else ""),
-                           me, ip)
                 return self._json({"ok": True})
             if p == "/api/mqtt":
                 cfg = app.mqtt_cfg(with_password=True)

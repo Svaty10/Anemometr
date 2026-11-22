@@ -79,6 +79,7 @@ async def main() -> None:
 
     mqtt = Mqtt(core, mqtt_settings)
     core.listeners.append(mqtt.notify)
+    core.removed_listeners.append(lambda nid: mqtt.remove_node(f"{nid:04X}"))
 
     loop = asyncio.get_running_loop()
     udp_port = int(env("VITR_UDP_PORT", "47613"))

@@ -69,6 +69,21 @@ CREATE TABLE IF NOT EXISTS audit (
     detail   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
+-- keys a sensor may still hold (as in the tank hub): handed out by a PAIR_ACK and not
+-- proven yet (reason 'pending'), or of a removed sensor ('removed', 'unpaired', ...);
+-- an UNPAIR signed with one of them releases the sensor without the programmer
+CREATE TABLE IF NOT EXISTS key_archive (
+    id        INTEGER PRIMARY KEY,
+    node_id   INTEGER NOT NULL,
+    k_enc     BLOB NOT NULL,
+    k_mac     BLOB NOT NULL,
+    ts        INTEGER NOT NULL,
+    reason    TEXT NOT NULL,
+    name      TEXT NOT NULL DEFAULT '',
+    username  TEXT NOT NULL DEFAULT 'system',
+    seen_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_key_archive_node ON key_archive(node_id);
 """
 
 

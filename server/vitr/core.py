@@ -1,10 +1,17 @@
 """Anemometer hub logic: radio frames from the tank hub's bridge, pairing, data.
 
-Frames arrive over UDP from the tank hub (bridge attached to it by system/retencka-most), which owns the
-CC1101. A PAIR_REQ is answered in the same datagram exchange (the node listens only
-~0.6 s): PAIR_ACK while the user opened the pairing window, UNPAIR when the user
-asked to unpair a sensor. New keys become valid only after the node proves them
-with its first authenticated DATA frame (as in the tank hub).
+Frames arrive over UDP from the tank hub (bridge attached to it by system/retencka-most),
+which owns the CC1101. A PAIR_REQ is answered in the same datagram exchange (the node
+listens only ~0.6 s). Pairing works exactly as in the tank hub:
+
+  * an unpaired sensor gets a PAIR_ACK only after the user confirmed its ID here
+    (start_pairing: ID from the label + name, valid PAIR_TARGET_S) – never by itself;
+  * a sensor that holds a key accepts nothing but an UNPAIR signed with that key. It is
+    sent only when the user asked for it here (unpair, or re-pair = unpair + pair), and
+    the sensor asks only after its battery was re-inserted (hub login + physical access);
+    the hub tries its current key, then pending and archived keys of the ID;
+  * new keys become valid only after the sensor proves them with its first DATA frame;
+  * keys of a removed sensor are archived, so a later pairing of its ID releases it.
 
 Wind speed is computed from the raw counts on every query, so changing the
 anemometer factor recomputes the whole history:
@@ -29,8 +36,14 @@ from .db import Database
 log = logging.getLogger("vitr.core")
 
 MAGIC = b"RB1"
-PAIR_WINDOW_S = 600
-PENDING_KEY_S = 24 * 3600
+PAIR_TARGET_S = 15 * 60           # user's confirmation of an ID: new PAIR_ACKs this long
+PENDING_KEY_S = 24 * 3600         # key of a PAIR_ACK accepted on the first DATA this long
+PAIR_REQUESTS_MAX = 64            # PAIR_REQ is unauthenticated: bounded request log
+PAIR_PUBS_MAX = 8
+PENDING_MAX = 4                   # handed-out keys per ID (strongest signal kept)
+ARCHIVE_MAX = 8                   # archived keys per ID
+UNPAIR_SETTLE_S = 20              # no paired request this long after the confirmation -> removed
+HEARD_MAX = 20
 ONLINE_S = 5 * 60                 # last packet younger than this: online
 STALE_S = 30 * 60                 # ... then "stale", older: offline
 GUST_NODE_S = 3                   # firmware: gust over 3 node seconds
@@ -55,14 +68,15 @@ class Core:
         self.db = db
         self.now = clock
         self.lock = threading.RLock()
-        self.pair_until = 0.0
-        self._hub_priv: Optional[bytes] = None
-        self._hub_pub: Optional[bytes] = None
-        self._pending: dict[int, list[dict]] = {}
-        self._unpair_sent: dict[int, float] = {}
+        self.pair_requests: dict[int, dict] = {}   # node -> {ts, rssi, count, node_paired, pubs}
+        self.pair_targets: dict[int, dict] = {}    # node -> {priv, pub, expires, name, user}
+        self._unpair_sent: dict[int, float] = {}   # node -> last UNPAIR sent
+        self._unpair_confirm: dict[int, float] = {}  # node -> unpaired request after the UNPAIR
+        self._unpair_rot: dict[int, int] = {}      # node -> next UNPAIR key candidate
         self._last_rx: dict[int, tuple[float, int]] = {}   # node -> (arrival, ctr)
-        self.heard: dict[int, dict] = {}                   # unknown nodes heard (for the web)
+        self.heard: dict[int, dict] = {}           # every ID heard recently (for the web)
         self.listeners: list[Callable[[int], None]] = []   # called with a node id on new data
+        self.removed_listeners: list[Callable[[int], None]] = []   # ... when a sensor was removed
         self.stats = {"frames": 0, "data": 0, "auth_fail": 0, "replay": 0, "pair_req": 0,
                       "last_frame": 0.0}
 
@@ -99,94 +113,271 @@ class Core:
                 return None
             if frame[0] == crypto.PKT_PAIR_REQ:
                 self.stats["pair_req"] += 1
-                return self._pair_request(frame, rssi)
+                req = crypto.parse_pair_req(frame)
+                if req is None:
+                    return None
+                reply = self._respond(*req)
+                self._note_request(*req, rssi)
+                self.unpair_tick()
+                return reply
             if frame[0] == crypto.PKT_DATA:
                 self._data(frame, rssi)
             return None
 
+    def _heard(self, nid: int, rssi: float, kind: str) -> dict:
+        h = self.heard.pop(nid, {"count": 0})
+        h.update(ts=self.now(), rssi=rssi, count=h["count"] + 1, kind=kind)
+        self.heard[nid] = h                               # re-insert: least recently heard first
+        while len(self.heard) > HEARD_MAX:
+            del self.heard[next(iter(self.heard))]
+        return h
+
     # ---------------------------------------------------------- pairing
-    def start_pairing(self) -> None:
-        with self.lock:
-            self.pair_until = self.now() + PAIR_WINDOW_S
-            if self._hub_priv is None:
-                self._hub_priv, self._hub_pub = crypto.x25519_keypair()
-            log.info("Pairing window open for %d s", PAIR_WINDOW_S)
-
-    def stop_pairing(self) -> None:
-        with self.lock:
-            self.pair_until = 0.0
-
-    def pairing_left(self) -> int:
-        return max(0, int(self.pair_until - self.now()))
-
-    def _pair_request(self, frame: bytes, rssi: float) -> Optional[bytes]:
-        req = crypto.parse_pair_req(frame)
-        if req is None:
-            return None
-        nid, node_pub, node_paired = req
+    def _respond(self, nid: int, node_pub: bytes, node_paired: bool) -> Optional[bytes]:
+        """Answer to a PAIR_REQ (see the module docstring)."""
         now = self.now()
+        t = self.pair_targets.get(nid)
+        if t is not None and t["expires"] < now:
+            t = None
         node = self.node(nid)
-        self.heard[nid] = {"ts": now, "rssi": rssi, "paired": node_paired}
+        unpairing = bool(node and node["unpair"])
         if node_paired:
-            # a sensor that holds a key accepts nothing but an UNPAIR signed with it;
-            # sent only when the user asked to unpair this sensor here
-            if node and node["unpair"] and node["k_mac"]:
-                self._unpair_sent[nid] = now
-                log.info("Sending UNPAIR to %04X", nid)
-                return crypto.build_unpair(node["k_mac"], nid, node_pub)
-            return None
-        # the sensor holds no key
-        if node and node["unpair"] and nid in self._unpair_sent:
-            label = self.label(nid)
-            self.forget(nid)                              # it confirmed the unpairing
-            log.info("Node %04X confirmed unpairing", nid)
-            self.audit("NODE_UNPAIRED", f"Čidlo {label} potvrdilo odpárování")
-            node = None
-        if now >= self.pair_until or self._hub_priv is None:
-            return None                                   # only while the user waits for it
+            if not unpairing and t is None:
+                return None                               # battery swap etc.: nothing to do
+            cands = self._unpair_candidates(nid, node)
+            if not cands:
+                return None                               # paired to a hub we know nothing of
+            i = self._unpair_rot.get(nid, 0)
+            self._unpair_rot[nid] = i + 1
+            self._unpair_sent[nid] = now                  # it still holds a key: an earlier
+            self._unpair_confirm.pop(nid, None)           # "unpaired" request did not count
+            log.info("Sending UNPAIR to %04X", nid)
+            return crypto.build_unpair(cands[i % len(cands)], nid, node_pub)
+        if unpairing or t is None:
+            return None                                   # not confirmed by the user
         if node is None and len(self.nodes()) >= MAX_NODES:
             return None
-        keys = crypto.derive_keys(crypto.x25519(self._hub_priv, node_pub))
+        if t["priv"] is None:
+            t["priv"], t["pub"] = crypto.x25519_keypair()
+        keys = crypto.derive_keys(crypto.x25519(t["priv"], node_pub))
         if keys is None:
             return None
-        lst = self._pending.setdefault(nid, [])
-        if not any(e["k_mac"] == keys[1] for e in lst):
-            lst.append({"k_enc": keys[0], "k_mac": keys[1], "ts": now})
-        return crypto.build_pair_ack(nid, self._hub_pub)
+        if not self.db.one("SELECT id FROM key_archive WHERE node_id=? AND k_mac=? AND reason='pending'",
+                           (nid, keys[1])):           # a retry gives the same key
+            self.db.execute("INSERT INTO key_archive(node_id, k_enc, k_mac, ts, reason, name, username) "
+                            "VALUES(?,?,?,?,'pending',?,?)",
+                            (nid, keys[0], keys[1], int(now), t.get("name") or "", t.get("user") or "system"))
+            self._trim_pending(nid)
+        return crypto.build_pair_ack(nid, t["pub"])
 
-    def _commit(self, nid: int, entry: dict) -> None:
+    def _note_request(self, nid: int, node_pub: bytes, node_paired: bool, rssi: float) -> None:
+        self._heard(nid, rssi, "pair")
+        pr = self.pair_requests.pop(nid, None) or {"count": 0, "pubs": set()}
+        if len(pr["pubs"]) < PAIR_PUBS_MAX:
+            pr["pubs"].add(node_pub.hex())
+        pr.update(ts=self.now(), rssi=rssi, count=pr["count"] + 1, node_paired=node_paired)
+        self.pair_requests[nid] = pr
+        while len(self.pair_requests) > PAIR_REQUESTS_MAX:
+            del self.pair_requests[next(iter(self.pair_requests))]
         node = self.node(nid)
+        if node and node["unpair"] and not node_paired and nid in self._unpair_sent:
+            # the sensor says it has forgotten its key. The request is not authenticated:
+            # it counts only after an UNPAIR was sent, and the sensor is removed only when
+            # it stays unpaired for UNPAIR_SETTLE_S (unpair_tick)
+            self._unpair_confirm.setdefault(nid, self.now())
+
+    def _unpair_candidates(self, nid: int, node: Optional[dict]) -> list[bytes]:
+        """MAC keys an UNPAIR may be signed with: current key, then keys seen in DATA
+        frames, then the newest pending / archived ones."""
+        out = []
+        if node and node["k_mac"]:
+            out.append(bytes(node["k_mac"]))
+        for r in self.db.all("SELECT k_mac FROM key_archive WHERE node_id=? "
+                             "ORDER BY seen_at IS NOT NULL DESC, IFNULL(seen_at, 0) DESC, ts DESC, id DESC", (nid,)):
+            k = bytes(r["k_mac"])
+            if k not in out:
+                out.append(k)
+        return out
+
+    def _trim_pending(self, nid: int) -> None:
+        ids = [r["id"] for r in self.db.all("SELECT id FROM key_archive WHERE node_id=? AND reason='pending' "
+                                            "ORDER BY ts DESC, id DESC", (nid,))]
+        for old in ids[PENDING_MAX:]:
+            self.db.execute("UPDATE key_archive SET reason='expired' WHERE id=?", (old,))
+        self._trim_archive(nid)
+
+    def _trim_archive(self, nid: int) -> None:
+        ids = [r["id"] for r in self.db.all(
+            "SELECT id FROM key_archive WHERE node_id=? AND reason<>'pending' "
+            "ORDER BY seen_at IS NOT NULL DESC, IFNULL(seen_at, 0) DESC, ts DESC, id DESC", (nid,))]
+        for old in ids[ARCHIVE_MAX:]:
+            self.db.execute("DELETE FROM key_archive WHERE id=?", (old,))
+
+    def _pending(self, nid: int) -> list[dict]:
+        self.db.execute("UPDATE key_archive SET reason='expired' WHERE reason='pending' AND ts<?",
+                        (int(self.now() - PENDING_KEY_S),))
+        return self.db.all("SELECT * FROM key_archive WHERE node_id=? AND reason='pending' ORDER BY id", (nid,))
+
+    def _drop_pending(self, nid: int, reason: str) -> None:
+        self.db.execute("UPDATE key_archive SET reason=? WHERE node_id=? AND reason='pending'", (reason, nid))
+        self._trim_archive(nid)
+
+    def _match_archive(self, nid: int, frame: bytes) -> bool:
+        """An unaccepted DATA frame signed with an archived key: the sensor still holds
+        it, so the web offers re-pairing (UNPAIR with that key)."""
+        for r in self.db.all("SELECT id, k_enc, k_mac FROM key_archive WHERE node_id=? AND reason<>'pending'", (nid,)):
+            if crypto.open_data(bytes(r["k_enc"]), bytes(r["k_mac"]), frame) is not None:
+                self.db.execute("UPDATE key_archive SET seen_at=? WHERE id=?", (int(self.now()), r["id"]))
+                return True
+        return False
+
+    def archive_info(self, nid: int) -> dict:
+        rows = self.db.all("SELECT name, seen_at FROM key_archive WHERE node_id=? ORDER BY id", (nid,))
+        return {"archived": bool(rows), "key_match": any(r["seen_at"] for r in rows),
+                "archived_name": next((r["name"] for r in reversed(rows) if r["name"]), "")}
+
+    def start_pairing(self, nid: int, name: str, user: str = "system") -> None:
+        """The user confirmed this ID: answer its next requests (UNPAIR with any key the
+        hub holds for it if the sensor is still paired, then PAIR_ACK)."""
+        with self.lock:
+            node = self.node(nid)
+            if node and node["unpair"]:
+                self.db.execute("UPDATE nodes SET unpair=0 WHERE id=?", (nid,))   # re-pair instead of removing
+            self.pair_targets[nid] = {"priv": None, "pub": None, "expires": self.now() + PAIR_TARGET_S,
+                                      "name": name, "user": user}
+            self._clear_unpair(nid)
+
+    def cancel_pairing(self, nid: int) -> None:
+        with self.lock:
+            self.pair_targets.pop(nid, None)
+            self._drop_pending(nid, "cancelled")
+
+    def _clear_unpair(self, nid: int) -> None:
+        self._unpair_sent.pop(nid, None)
+        self._unpair_confirm.pop(nid, None)
+        self._unpair_rot.pop(nid, None)
+
+    def unpair_tick(self) -> None:
+        """Finish unpairings the sensor confirmed and did not take back."""
+        now = self.now()
+        for nid in [k for k, ts in self._unpair_confirm.items() if now - ts >= UNPAIR_SETTLE_S]:
+            node = self.node(nid)
+            self._unpair_confirm.pop(nid, None)
+            if node is None or not node["unpair"]:
+                continue
+            self.forget_node(nid, "NODE_UNPAIRED", f"Čidlo {self.label(nid)} odpárováno – potvrzeno čidlem")
+
+    def request_unpair(self, nid: int, user: str = "system", ip: str = "") -> None:
+        """Step 1 of unpairing: stop accepting data, wait for the sensor to confirm
+        after its battery was re-inserted."""
+        with self.lock:
+            self.cancel_pairing(nid)
+            self._clear_unpair(nid)
+            self.db.execute("UPDATE nodes SET unpair=1 WHERE id=?", (nid,))
+            self.audit("NODE_UNPAIR_REQUESTED",
+                       f"Odpárování čidla {self.label(nid)} – čeká na vložení baterie do čidla", user, ip)
+
+    def cancel_unpair(self, nid: int, user: str = "system", ip: str = "") -> None:
+        with self.lock:
+            self.db.execute("UPDATE nodes SET unpair=0 WHERE id=?", (nid,))
+            self._clear_unpair(nid)
+            self.audit("NODE_UNPAIR_CANCELLED", f"Odpárování čidla {self.label(nid)} zrušeno", user, ip)
+
+    def forget_node(self, nid: int, action: str, detail: str, user: str = "system", ip: str = "") -> None:
+        """Delete the sensor; its measured data stay. Its key goes to the archive: if the
+        sensor still holds it, pairing its ID again releases it with a signed UNPAIR."""
+        with self.lock:
+            node = self.node(nid) or {}
+            reason = "unpaired" if action == "NODE_UNPAIRED" else "removed"
+            self.pair_targets.pop(nid, None)
+            self._drop_pending(nid, reason)
+            self._clear_unpair(nid)
+            if node.get("k_mac"):
+                if not self.db.one("SELECT id FROM key_archive WHERE node_id=? AND k_mac=?", (nid, node["k_mac"])):
+                    self.db.execute("INSERT INTO key_archive(node_id, k_enc, k_mac, ts, reason, name, username) "
+                                    "VALUES(?,?,?,?,?,?,?)", (nid, node["k_enc"], node["k_mac"], int(self.now()),
+                                                               reason, node.get("name") or "", user or "system"))
+                self._trim_archive(nid)
+            self.db.execute("DELETE FROM nodes WHERE id=?", (nid,))
+            self._last_rx.pop(nid, None)
+            self.audit(action, detail + "; naměřená data zůstávají", user, ip)
+            log.info("Node %04X removed (%s)", nid, action)
+            for cb in list(self.removed_listeners):
+                try:
+                    cb(nid)
+                except Exception:
+                    log.exception("listener failed")
+
+    def _commit(self, nid: int, entry: dict) -> bool:
+        """The first DATA frame proved a key from a confirmed PAIR_ACK: it becomes the
+        sensor's key; older pending and archived keys of the ID are dropped."""
+        node = self.node(nid)
+        if node is None and len(self.nodes()) >= MAX_NODES:
+            log.warning("Node %04X proved its pairing key, but the hub is full (%d sensors)", nid, MAX_NODES)
+            return False
+        t = self.pair_targets.pop(nid, {})
+        self.pair_requests.pop(nid, None)
+        self._clear_unpair(nid)
+        old_name = self.archive_info(nid)["archived_name"]
         now = int(self.now())
         if node is None:
             n = len(self.nodes()) + 1
-            self.db.execute("INSERT INTO nodes(id, name, k_enc, k_mac, paired_at, position) "
-                            "VALUES(?, ?, ?, ?, ?, ?)",
-                            (nid, f"Anemometr {n}", entry["k_enc"], entry["k_mac"], now, n))
+            name = t.get("name") or entry.get("name") or old_name or f"Anemometr {n}"
+            pos = (self.db.scalar("SELECT MAX(position) FROM nodes", default=0) or 0) + 1
+            self.db.execute("INSERT INTO nodes(id, name, k_enc, k_mac, paired_at, position) VALUES(?, ?, ?, ?, ?, ?)",
+                            (nid, name[:40], entry["k_enc"], entry["k_mac"], now, pos))
         else:
-            self.db.execute("UPDATE nodes SET k_enc=?, k_mac=?, unpair=0, last_ctr=-1, paired_at=? "
-                            "WHERE id=?", (entry["k_enc"], entry["k_mac"], now, nid))
-        self._pending.pop(nid, None)
-        self._unpair_sent.pop(nid, None)
+            self.db.execute("UPDATE nodes SET k_enc=?, k_mac=?, unpair=0, last_ctr=-1, paired_at=? WHERE id=?",
+                            (entry["k_enc"], entry["k_mac"], now, nid))
+        self.db.execute("DELETE FROM key_archive WHERE node_id=?", (nid,))
         self._last_rx.pop(nid, None)
-        self.heard.pop(nid, None)
+        if nid in self.heard:
+            self.heard[nid].pop("key_match", None)
+        self.audit("NODE_PAIRED", f"Čidlo {self.label(nid)} {'spárováno' if node is None else 'znovu spárováno (nový klíč)'}",
+                   t.get("user") or entry.get("username") or "system")
         log.info("Node %04X paired", nid)
-        self.audit("NODE_PAIRED", f"Spárováno čidlo {self.label(nid)}")
+        return True
 
-    def request_unpair(self, nid: int, on: bool = True) -> None:
+    def pairing_status(self) -> dict:
+        """For the web, the same shape as the tank hub's."""
         with self.lock:
-            self.db.execute("UPDATE nodes SET unpair=? WHERE id=?", (1 if on else 0, nid))
-            self._unpair_sent.pop(nid, None)
+            now = self.now()
+            self.unpair_tick()
+            for k in [k for k, v in self.pair_targets.items() if v["expires"] < now]:
+                self.pair_targets.pop(k, None)
+            self.db.execute("UPDATE key_archive SET reason='expired' WHERE reason='pending' AND ts<?",
+                            (int(now - PENDING_KEY_S),))
+            pend: dict[int, list] = {}
+            for r in self.db.all("SELECT node_id, name, ts FROM key_archive WHERE reason='pending' ORDER BY id"):
+                pend.setdefault(r["node_id"], []).append(r)
+            archived = {r["node_id"] for r in self.db.all("SELECT DISTINCT node_id FROM key_archive")}
+            known = {n["id"] for n in self.nodes()}
+            reqs = [{"id": f"{k:04X}", "rssi": v["rssi"], "age_s": int(now - v["ts"]), "count": v["count"],
+                     "pub_count": len(v["pubs"]), "known": k in known, "node_paired": v["node_paired"],
+                     "target": k in self.pair_targets, "answered": k in pend, "archived": k in archived}
+                    for k, v in sorted(self.pair_requests.items(), key=lambda kv: -kv[1]["ts"])
+                    if now - v["ts"] < 120]
+            targets = [{"id": f"{k:04X}", "name": v["name"], "expires_in": int(v["expires"] - now),
+                        "answered": k in pend, "rssi": (self.pair_requests.get(k) or {}).get("rssi"),
+                        "pub_count": max(len((self.pair_requests.get(k) or {}).get("pubs", ())), len(pend.get(k, ())))}
+                       for k, v in self.pair_targets.items()]
+            pending = [{"id": f"{k:04X}", "name": v[-1]["name"] or "",
+                        "expires_in": int(max(e["ts"] for e in v) + PENDING_KEY_S - now),
+                        "rssi": (self.pair_requests.get(k) or {}).get("rssi"),
+                        "pub_count": max(len((self.pair_requests.get(k) or {}).get("pubs", ())), len(v))}
+                       for k, v in pend.items() if k not in self.pair_targets]
+            return {"requests": reqs, "targets": targets, "pending": pending}
 
-    def forget(self, nid: int) -> None:
-        """Remove the sensor (keys and settings); its history stays for a re-pairing."""
-        with self.lock:
-            self.db.execute("DELETE FROM nodes WHERE id=?", (nid,))
-            self._pending.pop(nid, None)
-            self._unpair_sent.pop(nid, None)
-            self._last_rx.pop(nid, None)
-
-    def delete_history(self, nid: int) -> None:
-        self.db.execute("DELETE FROM samples WHERE node_id=?", (nid,))
+    def heard_list(self) -> list[dict]:
+        now = self.now()
+        known = {n["id"] for n in self.nodes()}
+        out = []
+        for nid, h in reversed(list(self.heard.items())):
+            arch = self.archive_info(nid)
+            out.append({"id": f"{nid:04X}", "rssi": h["rssi"], "age_s": int(now - h["ts"]), "count": h["count"],
+                        "added": nid in known, "kind": h["kind"], "archived": arch["archived"],
+                        "key_match": bool(h.get("key_match")), "archived_name": arch["archived_name"]})
+        return out
 
     # ------------------------------------------------------------- data
     def _data(self, frame: bytes, rssi: float) -> None:
@@ -194,24 +385,26 @@ class Core:
         if hdr is None:
             return
         nid, ctr = hdr
+        heard = self._heard(nid, rssi, "data")
         node = self.node(nid)
+        if node and node["unpair"]:
+            return                                        # being unpaired: data no longer accepted
         fields = None
-        if node and node["k_enc"] and not node["unpair"]:
+        if node and node["k_enc"]:
             fields = crypto.open_data(node["k_enc"], node["k_mac"], frame)
         if fields is None:
-            now = self.now()
-            for e in [e for e in self._pending.get(nid, []) if now - e["ts"] < PENDING_KEY_S]:
-                f = crypto.open_data(e["k_enc"], e["k_mac"], frame)
+            for e in self._pending(nid):
+                f = crypto.open_data(bytes(e["k_enc"]), bytes(e["k_mac"]), frame)
                 if f is not None:
-                    self._commit(nid, e)
-                    node = self.node(nid)
-                    fields = f
+                    if self._commit(nid, e):
+                        node = self.node(nid)
+                        fields = f
                     break
         if fields is None:
-            self.stats["auth_fail"] += 1
-            if node is None:
-                self.heard[nid] = {"ts": self.now(), "rssi": rssi, "paired": True}
-            return
+            if node is not None:
+                self.stats["auth_fail"] += 1
+            heard["key_match"] = self._match_archive(nid, frame)
+            return                                        # unknown node or forged / damaged frame
         if ctr <= node["last_ctr"]:
             self.stats["replay"] += 1                     # repeated copy or replay
             return
@@ -284,7 +477,7 @@ class Core:
         out = {
             "id": nid, "hex": f"{nid:04X}", "name": node["name"], "factor": f,
             "rev_ms": node["rev_ms"], "ppr": node["ppr"],
-            "clock": round(node["clock"], 4), "unpair": bool(node["unpair"]),
+            "clock": round(node["clock"], 4), "unpair": bool(node["unpair"]), "paired": bool(node["k_mac"]),
             "fw": node.get("fw"), "status": "offline", "last_seen": None,
             "speed_kmh": None, "gust_kmh": None, "avg10_kmh": None, "avg1h_kmh": None,
             "gust_today_kmh": None, "gust_today_ts": None, "loss_pct": None, "link_pct": None,
@@ -361,10 +554,3 @@ class Core:
             "temp": [round(r["c"], 1) if r["c"] is not None else None for r in rows],
             "rssi": [round(r["r"], 1) if r["r"] is not None else None for r in rows],
         }
-
-    def heard_unknown(self) -> list[dict]:
-        now = self.now()
-        known = {n["id"] for n in self.nodes()}
-        return [{"id": k, "hex": f"{k:04X}", "age": int(now - v["ts"]), "rssi": v["rssi"],
-                 "paired": v["paired"]}
-                for k, v in sorted(self.heard.items()) if k not in known and now - v["ts"] < 3600]

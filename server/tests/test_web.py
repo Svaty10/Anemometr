@@ -114,7 +114,7 @@ class WebTest(unittest.TestCase):
         st, h, _ = c.req("GET", "/")
         self.assertEqual((st, h["Location"]), (302, "/login"))
         self.assertEqual(c.req("GET", "/js/app.js")[0], 404)
-        self.assertEqual(c.req("POST", "/api/pair/start", {})[0], 401)
+        self.assertEqual(c.req("POST", "/api/pairing/start", {"node_id": "1234", "name": "Test"})[0], 401)
         self.assertEqual(c.req("GET", "/setup")[0], 302)            # no ticket
         for p in ("/login", "/js/login.js", "/css/style.css"):
             self.assertEqual(c.req("GET", p)[0], 200, p)
@@ -155,11 +155,11 @@ class WebTest(unittest.TestCase):
         self.assertEqual(u.req("GET", "/")[0], 200)
         for p in ("/api/mqtt", "/api/users", "/api/audit"):
             self.assertEqual(u.req("GET", p)[0], 403, p)
-        for p in ("/api/pair/start", "/api/node/forget", "/api/mqtt", "/api/users/add"):
+        for p in ("/api/pairing/start", "/api/nodes/remove", "/api/mqtt", "/api/users/add"):
             self.assertEqual(u.req("POST", p, {"id": 1})[0], 403, p)
         # promote -> admin rights
         self.assertEqual(adm.req("POST", "/api/users/role", {"username": "petr", "role": "admin"})[0], 200)
-        self.assertEqual(u.req("POST", "/api/pair/start", {})[0], 200)
+        self.assertEqual(u.req("POST", "/api/pairing/start", {"node_id": "1234", "name": "Test"})[0], 200)
 
     def test_user_management(self):
         adm = self.admin()
@@ -208,12 +208,12 @@ class WebTest(unittest.TestCase):
         adm = self.admin()
         tok = adm.csrf
         adm.csrf = ""
-        self.assertEqual(adm.req("POST", "/api/pair/start", {})[0], 403)                 # no token
-        self.assertEqual(adm.req("POST", "/api/pair/start", {}, {"X-CSRF-Token": "x"})[0], 403)
+        self.assertEqual(adm.req("POST", "/api/pairing/start", {"node_id": "1234", "name": "Test"})[0], 403)                 # no token
+        self.assertEqual(adm.req("POST", "/api/pairing/start", {"node_id": "1234", "name": "Test"}, {"X-CSRF-Token": "x"})[0], 403)
         adm.csrf = tok
-        self.assertEqual(adm.req("POST", "/api/pair/start", {}, {"Origin": "http://evil.example"})[0], 403)
-        self.assertEqual(adm.req("POST", "/api/pair/start", {}, {"Origin": f"http://127.0.0.1:{self.port}"})[0], 200)
-        self.assertEqual(adm.req("POST", "/api/pair/stop", {}, {"Origin": "https://vitr.example",
+        self.assertEqual(adm.req("POST", "/api/pairing/start", {"node_id": "1234", "name": "Test"}, {"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(adm.req("POST", "/api/pairing/start", {"node_id": "1234", "name": "Test"}, {"Origin": f"http://127.0.0.1:{self.port}"})[0], 200)
+        self.assertEqual(adm.req("POST", "/api/pairing/cancel", {"node_id": "1234"}, {"Origin": "https://vitr.example",
                                                                  "X-Forwarded-Host": "vitr.example"})[0], 200)
         self.assertEqual(adm.req("POST", "/api/pair/start", raw=b"a=1",
                                  ctype="application/x-www-form-urlencoded")[0], 400)
@@ -299,12 +299,30 @@ class WebTest(unittest.TestCase):
 
     def test_audit_of_admin_actions(self):
         adm = self.admin()
-        adm.req("POST", "/api/pair/start", {})
+        adm.req("POST", "/api/pairing/start", {"node_id": "1234", "name": "Test"})
         adm.req("POST", "/api/mqtt", {"enabled": True, "host": "10.0.0.2", "port": 1883})
         d = adm.req("GET", "/api/audit?who=Matěj".replace("ě", "%C4%9B"))[2]
         acts = {x["action"] for x in d["logs"]}
         self.assertTrue({"NODE_PAIRING", "SETTINGS_CHANGED", "USER_ADDED"} <= acts, acts)
         self.assertEqual(adm.req("GET", "/api/audit?category=settings")[2]["total"], 1)
+
+    def test_pairing_api_like_tank_hub(self):
+        adm = self.admin()
+        st, _, d = adm.req("GET", "/api/nodes")
+        self.assertEqual(st, 200)
+        self.assertEqual(set(d), {"nodes", "heard", "pairing", "radio"})
+        self.assertEqual(adm.req("POST", "/api/pairing/start", {"node_id": "12G4", "name": "x"})[0], 400)
+        self.assertEqual(adm.req("POST", "/api/pairing/start", {"node_id": "abcd"})[0], 400)     # name missing
+        st, _, d = adm.req("POST", "/api/pairing/start", {"node_id": "abcd", "name": "Střecha"})
+        self.assertEqual([t["id"] for t in d["pairing"]["targets"]], ["ABCD"])
+        st, _, d = adm.req("POST", "/api/pairing/cancel", {"node_id": "ABCD"})
+        self.assertEqual(d["pairing"]["targets"], [])
+        self.assertEqual(adm.req("POST", "/api/nodes/remove", {"node_id": "ABCD"})[0], 404)
+        self.assertEqual(adm.req("POST", "/api/nodes/unpair/cancel", {"node_id": "ABCD"})[0], 404)
+        self.add_user(adm, "Host")
+        u = Client(self)
+        u.login("Host", PW)
+        self.assertEqual(u.req("GET", "/api/nodes")[0], 403)
 
 
 if __name__ == "__main__":

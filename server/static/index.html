@@ -39,6 +39,8 @@
         <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="9" r="3.2"/><path d="M3 19c1-3 3.2-4.5 6-4.5s5 1.5 6 4.5"/><path d="M15.5 6a3 3 0 0 1 0 6M17.5 14.8c1.7.6 2.9 2 3.5 4.2"/></symbol>
         <symbol id="i-ruler" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="1"/><path d="M7 8v3M11 8v4M15 8v3"/></symbol>
         <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+        <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
     </defs>
 </svg>
 
@@ -94,7 +96,7 @@
         <div id="emptyState" class="card empty-card hidden">
             <svg class="ico" aria-hidden="true"><use href="#i-wind"/></svg>
             <h2>Zatím žádný anemometr</h2>
-            <p class="muted admin-only hidden">V <b>Nastavení → Čidla</b> klikněte na <b>Čekat na nové čidlo</b> a pak do anemometru vložte baterii.</p>
+            <p class="muted admin-only hidden">V <b>Nastavení → Čidla</b> klikněte na <b>Přidat čidlo…</b>, vložte do anemometru baterii a potvrďte jeho ID ze štítku.</p>
             <p class="muted user-only">Anemometr zatím spáruje administrátor.</p>
         </div>
 
@@ -171,8 +173,13 @@
 
     <!-- ======================================================= NASTAVENÍ -->
     <div id="nastaveni" class="tab-content">
-        <div class="page-head"><h1>Nastavení</h1></div>
-
+        <div class="page-head">
+            <h1>Nastavení</h1>
+            <label class="toggle settings-mode">
+                <span class="toggle-text">Zobrazit pokročilá nastavení</span>
+                <span class="switch"><input type="checkbox" id="advToggle"><span class="slider"></span></span>
+            </label>
+        </div>
 
         <div class="set-layout" id="setLayout">
             <nav class="set-nav" id="setNav" aria-label="Části nastavení"></nav>
@@ -180,7 +187,7 @@
                 <section class="card" id="cardNodes" data-nav="Čidla" data-group="Anemometry">
                     <div class="card-title">
                         <span class="card-ico" aria-hidden="true"><svg class="ico"><use href="#i-antenna"/></svg></span>
-                        <div><h2>Čidla</h2><p class="card-desc">Spárované anemometry, párování nového čidla a čidla v dosahu.</p></div>
+                        <div><h2>Čidla</h2><p class="card-desc">Seznam čidel, přidání a párování nového čidla, čidla v dosahu.</p></div>
                     </div>
                     <div class="table-responsive">
                         <table class="user-table">
@@ -189,10 +196,35 @@
                         </table>
                     </div>
                     <div class="inline-actions">
-                        <button class="btn btn-primary" type="button" id="pairBtn">Čekat na nové čidlo</button>
-                        <span class="muted small" id="pairHint">Po kliknutí vložte do anemometru baterii – do minuty se spáruje.</span>
+                        <button class="btn btn-primary" type="button" id="addNodeBtn">Přidat čidlo…</button>
+                        <span class="muted small" id="pairHint">ID ze štítku, název a vložení baterie – vše v dialogu.</span>
                     </div>
-                    <p class="muted small hidden" id="heardList"></p>
+                    <!-- obsah dialogu Přidat čidlo (pairDialog ho přesune do dialogu a zpět) -->
+                    <div class="pair-panel hidden" id="pairPanel">
+                        <ol class="steps" id="pairSteps">
+                            <li data-step="1"><b>Vložte baterii</b><span>do anemometru</span></li>
+                            <li data-step="2"><b>Potvrďte ID</b><span>podle štítku</span></li>
+                            <li data-step="3"><b>První data</b><span>čekám na čidlo</span></li>
+                            <li data-step="4"><b>Hotovo</b><span>čidlo je přidané</span></li>
+                        </ol>
+                        <h3>Nová čidla v dosahu</h3>
+                        <div class="table-responsive">
+                            <table class="user-table">
+                                <thead><tr><th>Čidlo</th><th>Signál</th><th>Naposledy</th><th>Stav</th><th></th></tr></thead>
+                                <tbody id="pairBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="adv">
+                        <h3>Čidla v dosahu</h3>
+                        <div class="table-responsive">
+                            <table class="user-table">
+                                <thead><tr><th>ID</th><th>Signál</th><th>Naposledy</th><th>Paketů</th><th>Typ</th><th></th></tr></thead>
+                                <tbody id="heardBody"></tbody>
+                            </table>
+                        </div>
+                        <dl class="kv mt-20" id="radioInfo"></dl>
+                    </div>
                 </section>
 
                 <div id="nodeCards"></div>
@@ -335,6 +367,19 @@
                 <p class="muted small mt-20" id="aboutLine"></p>
             </section>
         </div>
+    </div>
+</div>
+
+<!-- Obecný dialog: potvrzení i formuláře (jako u retenčky) -->
+<div class="modal-backdrop hidden" id="cfmModal">
+    <div class="modal modal-sm" role="alertdialog" aria-modal="true" aria-labelledby="cfmTitle" aria-describedby="cfmBody" tabindex="-1">
+        <div class="modal-head">
+            <h2 id="cfmTitle">Potvrzení</h2>
+            <button class="icon-btn" id="cfmClose" type="button" aria-label="Zavřít">
+                <svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="modal-body" id="cfmBody"></div>
+        <div class="modal-foot" id="cfmFoot"></div>
     </div>
 </div>
 

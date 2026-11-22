@@ -65,17 +65,44 @@ class CoreTest(unittest.TestCase):
         self.db.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def pair(self, node):
-        self.core.start_pairing()
+    def pair(self, node, name=""):
+        self.core.start_pairing(node.nid, name)
         ans = self.core.on_datagram(dgram(node.pair_req()))
         self.assertEqual(ans[:3], MAGIC)
         node.take_ack(ans[3:])
         self.core.on_datagram(dgram(node.data(0, 0)))       # first DATA proves the key
 
-    def test_no_pairing_without_window(self):
-        n = FakeNode()
+    def test_no_pairing_without_confirmed_id(self):
+        n, other = FakeNode(), FakeNode(0x7777)
         self.assertEqual(self.core.on_datagram(dgram(n.pair_req())), MAGIC)   # empty answer
+        self.core.start_pairing(other.nid, "Jiný")
+        self.assertEqual(self.core.on_datagram(dgram(n.pair_req())), MAGIC)   # another ID confirmed
         self.assertEqual(self.core.nodes(), [])
+        st = self.core.pairing_status()
+        self.assertEqual([q["id"] for q in st["requests"]], ["1234"])
+        self.assertEqual(st["requests"][0]["known"], False)
+        self.assertEqual([t["id"] for t in st["targets"]], ["7777"])
+        self.clock.t += 16 * 60                                               # confirmation expired
+        self.assertEqual(self.core.pairing_status()["targets"], [])
+
+    def test_pairing_with_name_and_pending(self):
+        n = FakeNode()
+        self.core.start_pairing(n.nid, "Střecha")
+        ans = self.core.on_datagram(dgram(n.pair_req()))
+        n.take_ack(ans[3:])
+        self.assertEqual(self.core.pairing_status()["targets"][0]["answered"], True)
+        self.assertEqual(self.core.nodes(), [])                               # not before the first data
+        self.core.cancel_pairing(n.nid)
+        self.assertEqual(self.core.pairing_status()["pending"], [])
+        self.core.on_datagram(dgram(n.data(0, 0)))
+        self.assertEqual(self.core.nodes(), [])                               # cancelled key: refused
+        # confirmed again: the sensor holds the cancelled key -> UNPAIR with it, then a new key
+        self.core.start_pairing(n.nid, "Střecha")
+        ans = self.core.on_datagram(dgram(n.pair_req()))
+        self.assertTrue(crypto.check_unpair(n.keys[1], n.nid, n.pub, ans[3:]))
+        n.keys = None
+        self.pair(n, "Střecha")
+        self.assertEqual(self.core.nodes()[0]["name"], "Střecha")
 
     def test_pair_and_measure(self):
         n = FakeNode()
@@ -144,7 +171,56 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(crypto.check_unpair(n.keys[1], n.nid, n.pub, unpair))
         n.keys = None                                      # the node forgets its key
         self.core.on_datagram(dgram(n.pair_req()))         # unpaired request = confirmation
+        self.assertEqual(len(self.core.nodes()), 1)        # ... settles first
+        self.clock.t += 25
+        self.core.pairing_status()
         self.assertEqual(self.core.nodes(), [])
+        self.assertTrue(self.core.archive_info(n.nid)["archived"])
+
+    def test_unpair_cancel_and_repair_known(self):
+        n = FakeNode()
+        self.pair(n, "A")
+        old = n.keys
+        self.core.request_unpair(n.nid)
+        self.core.cancel_unpair(n.nid)
+        self.assertEqual(self.core.on_datagram(dgram(n.pair_req())), MAGIC)
+        # re-pair a known sensor: UNPAIR with its key, then a new key
+        self.core.start_pairing(n.nid, "")
+        ans = self.core.on_datagram(dgram(n.pair_req()))
+        self.assertTrue(crypto.check_unpair(old[1], n.nid, n.pub, ans[3:]))
+        n.keys = None
+        ans = self.core.on_datagram(dgram(n.pair_req()))
+        n.take_ack(ans[3:])
+        self.core.on_datagram(dgram(n.data(5, 1)))
+        self.assertNotEqual(n.keys, old)
+        self.assertEqual(bytes(self.core.node(n.nid)["k_mac"]), n.keys[1])
+        self.assertEqual(self.core.node(n.nid)["name"], "A")
+
+    def test_removed_sensor_repaired_from_archive(self):
+        n = FakeNode()
+        self.pair(n, "Garáž")
+        self.core.forget_node(n.nid, "NODE_REMOVED", "test")
+        self.assertEqual(self.core.nodes(), [])
+        self.clock.t += 60
+        self.core.on_datagram(dgram(n.data(10, 1)))                           # still sends with the old key
+        h = {x["id"]: x for x in self.core.heard_list()}["1234"]
+        self.assertTrue(h["archived"] and h["key_match"] and not h["added"])
+        self.assertEqual(h["archived_name"], "Garáž")
+        self.core.start_pairing(n.nid, "")                                     # "Spárovat znovu"
+        ans = self.core.on_datagram(dgram(n.pair_req()))
+        self.assertTrue(crypto.check_unpair(n.keys[1], n.nid, n.pub, ans[3:]))
+        n.keys = None
+        ans = self.core.on_datagram(dgram(n.pair_req()))
+        n.take_ack(ans[3:])
+        self.core.on_datagram(dgram(n.data(10, 1)))
+        self.assertEqual(self.core.nodes()[0]["name"], "Garáž")
+        self.assertFalse(self.core.archive_info(n.nid)["archived"])
+
+    def test_foreign_paired_sensor_gets_nothing(self):
+        n = FakeNode()
+        n.keys = (bytes(16), bytes(16))                    # paired to another hub
+        self.core.start_pairing(n.nid, "Soused")
+        self.assertEqual(self.core.on_datagram(dgram(n.pair_req())), MAGIC)
 
     def test_two_anemometers(self):
         a, b = FakeNode(0x1111), FakeNode(0x2222)
