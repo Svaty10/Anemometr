@@ -50,6 +50,10 @@ class BridgeProtocol(asyncio.DatagramProtocol):
             return
         if reply is not None:
             self.transport.sendto(reply, addr)
+        try:
+            self.core.after_reply()              # database work only after the answer left
+        except Exception:
+            log.exception("after reply failed")
 
 
 def first_start(db: Database, data_dir: Path) -> None:

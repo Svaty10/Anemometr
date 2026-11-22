@@ -116,10 +116,14 @@ step "Most k rádiu retenčky"
 if systemctl cat retencka.service >/dev/null 2>&1; then
     DROP=/etc/systemd/system/retencka.service.d/vitr-most.conf
     install -d -m 755 /etc/systemd/system/retencka.service.d
-    if ! cmp -s "$SRC/system/retencka-most/vitr-most.conf" "$DROP"; then
+    MOST_CHANGED=""
+    for f in vitr_most.py sitecustomize.py; do
+        cmp -s "$SRC/system/retencka-most/$f" "$PREV/system/retencka-most/$f" 2>/dev/null || MOST_CHANGED=1
+    done
+    if ! cmp -s "$SRC/system/retencka-most/vitr-most.conf" "$DROP" || [ -n "$MOST_CHANGED" ]; then
         install -m 644 "$SRC/system/retencka-most/vitr-most.conf" "$DROP"
         systemctl daemon-reload
-        echo "Restartuji retenčku, aby se most připojil…"
+        echo "Restartuji retenčku, aby se načetl most…"
         systemctl restart retencka
         sleep 8
     fi

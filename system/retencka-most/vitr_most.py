@@ -65,6 +65,7 @@ class Bridge:
     def forward(self, payload: bytes, rssi: float, lqi: int) -> Optional[bytes]:
         """Send the frame to the service; for a request wait briefly for its answer."""
         want = payload[0] in REQUEST_TYPES
+        t0 = time.monotonic()
         msg = (MAGIC + bytes([1 if want else 0])
                + struct.pack("<hB", max(-32768, min(32767, int(round(rssi * 10)))), lqi & 0xFF)
                + payload)
@@ -78,9 +79,11 @@ class Bridge:
                 if not want:
                     return None
                 data = s.recv(128)
-        except (socket.timeout, OSError):
+        except (socket.timeout, OSError) as e:
             if want:
                 self.errors += 1                      # service not running or too slow
+                log.warning("vitr-most: no answer from vitr to the pairing request of %02X%02X (%s)",
+                            payload[2], payload[1], "timeout" if isinstance(e, socket.timeout) else e)
             return None
         frame = data[len(MAGIC):] if data[:len(MAGIC)] == MAGIC else b""
         if not frame:
@@ -90,6 +93,8 @@ class Bridge:
             self.errors += 1
             return None
         self.answers += 1
+        log.warning("vitr-most: answer 0x%02X for %02X%02X from vitr after %.0f ms",
+                    frame[0], payload[2], payload[1], (time.monotonic() - t0) * 1000)
         return frame
 
 

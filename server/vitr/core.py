@@ -74,6 +74,7 @@ class Core:
         self._unpair_confirm: dict[int, float] = {}  # node -> unpaired request after the UNPAIR
         self._unpair_rot: dict[int, int] = {}      # node -> next UNPAIR key candidate
         self._last_rx: dict[int, tuple[float, int]] = {}   # node -> (arrival, ctr)
+        self._deferred: list[Callable[[], object]] = []    # database work after a PAIR_REQ answer
         self.heard: dict[int, dict] = {}           # every ID heard recently (for the web)
         self.listeners: list[Callable[[int], None]] = []   # called with a node id on new data
         self.removed_listeners: list[Callable[[int], None]] = []   # ... when a sensor was removed
@@ -100,8 +101,12 @@ class Core:
         want = data[3] == 1
         rssi10, lqi = struct.unpack_from("<hB", data, 4)
         frame = bytes(data[7:])
+        t0 = time.perf_counter()
         reply = self.on_frame(frame, rssi10 / 10.0, lqi)
         if want:
+            if reply:
+                log.info("Answer 0x%02X to %04X in %.0f ms", reply[0], struct.unpack_from("<H", reply, 1)[0],
+                         (time.perf_counter() - t0) * 1000)
             return MAGIC + (reply or b"")
         return None
 
@@ -116,17 +121,31 @@ class Core:
                 req = crypto.parse_pair_req(frame)
                 if req is None:
                     return None
+                # the sensor listens only ~0.6 s: answer from memory, the bookkeeping
+                # (database) runs after the answer was sent (after_reply), as in the tank hub
                 reply = self._respond(*req)
-                self._note_request(*req, rssi)
-                self.unpair_tick()
+                ts = self.now()
+                self._deferred.append(lambda: (self._note_request(*req, rssi, ts), self.unpair_tick()))
                 return reply
             if frame[0] == crypto.PKT_DATA:
+                self.after_reply()
                 self._data(frame, rssi)
             return None
 
-    def _heard(self, nid: int, rssi: float, kind: str) -> dict:
+    def after_reply(self) -> None:
+        """Database work of answered PAIR_REQs (called by the bridge listener right after
+        sending the answer; everything that reads pairing state calls it first)."""
+        with self.lock:
+            while self._deferred:
+                fn = self._deferred.pop(0)
+                try:
+                    fn()
+                except Exception:
+                    log.exception("deferred pairing work failed")
+
+    def _heard(self, nid: int, rssi: float, kind: str, ts: Optional[float] = None) -> dict:
         h = self.heard.pop(nid, {"count": 0})
-        h.update(ts=self.now(), rssi=rssi, count=h["count"] + 1, kind=kind)
+        h.update(ts=self.now() if ts is None else ts, rssi=rssi, count=h["count"] + 1, kind=kind)
         self.heard[nid] = h                               # re-insert: least recently heard first
         while len(self.heard) > HEARD_MAX:
             del self.heard[next(iter(self.heard))]
@@ -162,20 +181,25 @@ class Core:
         keys = crypto.derive_keys(crypto.x25519(t["priv"], node_pub))
         if keys is None:
             return None
-        if not self.db.one("SELECT id FROM key_archive WHERE node_id=? AND k_mac=? AND reason='pending'",
-                           (nid, keys[1])):           # a retry gives the same key
-            self.db.execute("INSERT INTO key_archive(node_id, k_enc, k_mac, ts, reason, name, username) "
-                            "VALUES(?,?,?,?,'pending',?,?)",
-                            (nid, keys[0], keys[1], int(now), t.get("name") or "", t.get("user") or "system"))
-            self._trim_pending(nid)
+        name, user = t.get("name") or "", t.get("user") or "system"
+
+        def persist():
+            if not self.db.one("SELECT id FROM key_archive WHERE node_id=? AND k_mac=? AND reason='pending'",
+                               (nid, keys[1])):       # a retry gives the same key
+                self.db.execute("INSERT INTO key_archive(node_id, k_enc, k_mac, ts, reason, name, username) "
+                                "VALUES(?,?,?,?,'pending',?,?)", (nid, keys[0], keys[1], int(now), name, user))
+                self._trim_pending(nid)
+        self._deferred.append(persist)
         return crypto.build_pair_ack(nid, t["pub"])
 
-    def _note_request(self, nid: int, node_pub: bytes, node_paired: bool, rssi: float) -> None:
-        self._heard(nid, rssi, "pair")
+    def _note_request(self, nid: int, node_pub: bytes, node_paired: bool, rssi: float,
+                      ts: Optional[float] = None) -> None:
+        ts = self.now() if ts is None else ts
+        self._heard(nid, rssi, "pair", ts)
         pr = self.pair_requests.pop(nid, None) or {"count": 0, "pubs": set()}
         if len(pr["pubs"]) < PAIR_PUBS_MAX:
             pr["pubs"].add(node_pub.hex())
-        pr.update(ts=self.now(), rssi=rssi, count=pr["count"] + 1, node_paired=node_paired)
+        pr.update(ts=ts, rssi=rssi, count=pr["count"] + 1, node_paired=node_paired)
         self.pair_requests[nid] = pr
         while len(self.pair_requests) > PAIR_REQUESTS_MAX:
             del self.pair_requests[next(iter(self.pair_requests))]
@@ -184,7 +208,7 @@ class Core:
             # the sensor says it has forgotten its key. The request is not authenticated:
             # it counts only after an UNPAIR was sent, and the sensor is removed only when
             # it stays unpaired for UNPAIR_SETTLE_S (unpair_tick)
-            self._unpair_confirm.setdefault(nid, self.now())
+            self._unpair_confirm.setdefault(nid, ts)
 
     def _unpair_candidates(self, nid: int, node: Optional[dict]) -> list[bytes]:
         """MAC keys an UNPAIR may be signed with: current key, then keys seen in DATA
@@ -240,15 +264,18 @@ class Core:
         """The user confirmed this ID: answer its next requests (UNPAIR with any key the
         hub holds for it if the sensor is still paired, then PAIR_ACK)."""
         with self.lock:
+            self.after_reply()
             node = self.node(nid)
             if node and node["unpair"]:
                 self.db.execute("UPDATE nodes SET unpair=0 WHERE id=?", (nid,))   # re-pair instead of removing
-            self.pair_targets[nid] = {"priv": None, "pub": None, "expires": self.now() + PAIR_TARGET_S,
+            priv, pub = crypto.x25519_keypair()          # not inside the sensor's 0.6 s window
+            self.pair_targets[nid] = {"priv": priv, "pub": pub, "expires": self.now() + PAIR_TARGET_S,
                                       "name": name, "user": user}
             self._clear_unpair(nid)
 
     def cancel_pairing(self, nid: int) -> None:
         with self.lock:
+            self.after_reply()
             self.pair_targets.pop(nid, None)
             self._drop_pending(nid, "cancelled")
 
@@ -287,6 +314,7 @@ class Core:
         """Delete the sensor; its measured data stay. Its key goes to the archive: if the
         sensor still holds it, pairing its ID again releases it with a signed UNPAIR."""
         with self.lock:
+            self.after_reply()
             node = self.node(nid) or {}
             reason = "unpaired" if action == "NODE_UNPAIRED" else "removed"
             self.pair_targets.pop(nid, None)
@@ -341,6 +369,7 @@ class Core:
     def pairing_status(self) -> dict:
         """For the web, the same shape as the tank hub's."""
         with self.lock:
+            self.after_reply()
             now = self.now()
             self.unpair_tick()
             for k in [k for k, v in self.pair_targets.items() if v["expires"] < now]:
@@ -369,6 +398,7 @@ class Core:
             return {"requests": reqs, "targets": targets, "pending": pending}
 
     def heard_list(self) -> list[dict]:
+        self.after_reply()
         now = self.now()
         known = {n["id"] for n in self.nodes()}
         out = []

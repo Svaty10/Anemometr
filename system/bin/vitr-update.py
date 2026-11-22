@@ -488,6 +488,22 @@ def healthy(expected: str, since: float, timeout: int = 120) -> bool:
     return False
 
 
+def refresh_bridge(old: Path, new: Path) -> None:
+    """The radio bridge runs inside the tank hub (drop-in retencka.service.d/vitr-most.conf,
+    loaded from /opt/vitr/current at its start): when the new release changed it, restart
+    the tank hub so it loads it. Only when the drop-in is installed."""
+    if not Path("/etc/systemd/system/retencka.service.d/vitr-most.conf").exists():
+        return
+    for f in ("vitr_most.py", "sitecustomize.py"):
+        try:
+            if (old / "system" / "retencka-most" / f).read_bytes() == (new / "system" / "retencka-most" / f).read_bytes():
+                continue
+        except OSError:
+            pass
+        subprocess.run(["systemctl", "try-restart", "retencka.service"], check=False)
+        return
+
+
 def load_bad() -> set:
     try:
         v = json.loads((read_small(BAD, 65536) or b"[]").decode("utf-8"))
@@ -651,6 +667,7 @@ def install(rel: dict, cur: str, bad: set, st: Status) -> int:
     subprocess.run(["systemctl", "restart", SERVICE], check=False)
     if healthy(ver, restarted):
         db_snap.unlink(missing_ok=True)
+        refresh_bridge(previous, RELEASES / ver)
         st("done", f"Aktualizováno {cur} → {ver}", current=ver)
         keep = sorted((p for p in RELEASES.iterdir() if p.is_dir()), key=lambda p: vtuple(p.name))[-KEEP:]
         for p in RELEASES.iterdir():

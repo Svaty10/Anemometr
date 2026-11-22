@@ -3,6 +3,13 @@
 Formát dle [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), verze dle [SemVer](https://semver.org/).
 Postup vydání nové verze: [docs/vydani.md](docs/vydani.md).
 
+## [1.1.1] - 2026-11-22
+
+### Opraveno
+- **Párování se mohlo zaseknout na „čekám na data“:** odpověď na žádost čidla (čidlo poslouchá jen 0,6 s) šla až po zápisu do databáze na SD kartu a mohla přijít pozdě. Teď se odpověď pošle hned z paměti (jako u retenčky) a databáze se zapíše až potom; klíč potvrzeného ID se počítá už při potvrzení.
+- Most v logu retenčky zapisuje, za kolik ms vitr odpověděl, nebo že neodpověděl (`journalctl -u retencka | grep vitr-most`); vitr zapisuje čas odpovědi do svého logu.
+- Když nová verze změní most, instalace i aktualizace retenčku restartují, aby se načetl.
+
 ## [1.1.0] - 2026-11-22
 
 ### Přidáno
